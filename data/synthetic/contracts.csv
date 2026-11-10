@@ -1,0 +1,6 @@
+contract_id,supplier_id,ingredient_code,contract_type,currency,committed_monthly_volume_t,start_date,end_date,unit_price,index_series_key,base_price,index_base_value,pass_through,fixed_premium,notes,is_synthetic
+CT-001,SUP-001,sunflower_oil,fixed,EUR,100,2026-07-01,2027-06-30,1520.00,,,,,,Fictional fixed-price contract,true
+CT-002,SUP-002,sunflower_oil,fixed,EUR,80,2026-09-01,2027-01-15,1580.00,,,,,,Fictional fixed-price contract; ends mid-month (partial January),true
+CT-003,SUP-003,sunflower_oil,index_linked,EUR,120,2026-09-01,2027-08-31,,EC_OILSEEDS|Crude sunflower oil|Standard|ES|Average|DEPPROC||EUR|tonne,1600.00,1400.00,0.80,0,Fictional index-linked contract,true
+CT-004,SUP-004,wheat,fixed,EUR,600,2026-07-01,2027-06-30,265.00,,,,,,Fictional fixed-price contract,true
+CT-005,SUP-005,wheat,index_linked,EUR,300,2026-07-01,2027-06-30,,EC_CEREALS|Breadmaking common wheat|BLTPAN|ES||DEPSILO|Navarra|EUR|tonne,270.00,230.00,0.60,0,Fictional index-linked contract,true

@@ -1,6 +1,7 @@
 # Business Case — Procurement Risk & Mitigation Agent
  
-**Company:** Bakery Foods Inc. (fictional French bakery manufacturer)  
+**Company:** Bakery Foods Inc. (fictional industrial bakery manufacturer, headquartered in Spain)  
+**Fictional profile:** ~800 employees · ~€175M annual revenue · 3 factories in Spain · centralized raw-material procurement team · Spanish and European suppliers · key ingredients: wheat/flour, sunflower oil, sugar. These figures are invented scenario assumptions, not company data. The MVP covers sunflower oil (primary) and wheat (secondary); sugar is out of scope. The five synthetic suppliers are a sample of the supplier portfolio. Exposure is calculated from synthetic contracts, forecasts, benchmarks and stated assumptions, never from revenue, and is scenario-level procurement exposure rather than company-wide financial impact.  
 **Business function:** Raw Materials Procurement  
 **Scope:** Four-day MVP build and final demonstration  
 **Status:** Proposed prototype; business impact not yet validated
@@ -48,6 +49,7 @@ The agent will:
 - Approximately five fictional suppliers, five contracts, and three months of synthetic demand forecasts.
 - External research with identifiable sources and dates.
 - Retrieval of fictional procurement documents.
+- Discovery of **real alternative-supplier leads**, reported only as unverified sourcing leads (up to three, possibly none) with independently verifiable attributes.
 - Deterministic financial-impact scenarios with labeled assumptions.
 - One integrated report per request, including uncertainties.
 - Two example reports and selected functional and failure tests.
@@ -55,6 +57,7 @@ The agent will:
 **Out of scope**
 - Real ERP/S&OP integration or confidential company data.
 - Continuous monitoring and automated alerts.
+- Public-risk monitoring of the company's **existing** suppliers (plant closures, insolvency, strikes, sanctions) and mapping events to affected contracts: a future enhancement that needs real supplier master data; the MVP's existing suppliers are fictional.
 - Verified supplier qualification, negotiated quotes, or guaranteed capacity.
 - Autonomous purchasing or supplier approval.
 - Production-scale operations and service-level commitments.

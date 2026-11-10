@@ -1,6 +1,6 @@
 # PROCUREMENT RISK AGENT
 
-### AI-Powered Procurement Risk Intelligence | Food Manufacturing · France (Provisional)
+### AI-Powered Procurement Risk Intelligence | Food Manufacturing · Spain
 
 [![Python](https://img.shields.io/badge/Python-3.x-blue)](https://www.python.org/)
 ![Status](https://img.shields.io/badge/status-in%20development-orange)
@@ -10,9 +10,9 @@
 
 It is intended for raw-material procurement managers who need to understand market disruptions, estimate exposure, and evaluate mitigation options before making sourcing decisions.
 
-The business scenario uses **Bakery Foods Inc.**, a fictional bakery manufacturer. **France is the provisional operating market**, with potential sourcing across the European Union.
+The business scenario uses **Bakery Foods Inc.**, a fictional industrial bakery manufacturer headquartered in **Spain** (operating market, configurable), with Spanish and European suppliers. Fictional profile: ~800 employees, ~€175M annual revenue, 3 factories in Spain, a centralized procurement team, and key ingredients wheat/flour, sunflower oil and sugar. These are invented assumptions; the MVP covers sunflower oil and wheat, and exposure is calculated from synthetic contracts, forecasts and benchmarks, not from revenue.
 
-> **Project status (10 November 2026):** Business case, solution architecture, and evaluation plan are drafted. Official EU and French cereals datasets have been downloaded for feasibility review; the European Commission Cereals REST endpoints returned HTTP 500 during testing. The data ingestion pipeline, LangGraph agent, API integrations, n8n workflow, and end-to-end reports are **not yet implemented or validated**.
+> **Project status (10 November 2026):** Business case, solution architecture, evaluation plan and implementation plan ([docs/implementation-plan.md](docs/implementation-plan.md)) are drafted. Verified so far: Supabase PostgreSQL connectivity (`SELECT 1`), one successful Tavily and one GDELT request, and 79 offline tests (synthetic data, contract constraints, series keys, migration planning, both ingestion pipelines). A draft database schema and synthetic CSVs exist but have **not** been applied to the database. The ingestion pipelines, LangGraph agent, n8n workflow and end-to-end reports are **not yet implemented or validated**.
 
 ## The Problem
 
@@ -33,7 +33,7 @@ The intended MVP will:
 - Retrieve fictional supplier, contract, and demand-forecast data through SQL.
 - Retrieve relevant procurement policies and supplier assessments using **RAG with pgvector**.
 - Calculate financial exposure scenarios through **deterministic Python functions**, not LLM arithmetic.
-- Investigate approved supplier alternatives and identify a limited number of **unverified** external candidates.
+- Discover **real alternative-supplier leads** with Tavily (up to three, possibly none), each labelled **UNVERIFIED** and each attribute (identity, product type, country) shown only when a source states it; otherwise `unknown`.
 - Generate an evidence-backed report with assumptions, source references, uncertainties, and recommended next steps.
 - Use **n8n** for request intake and report delivery.
 
@@ -43,17 +43,16 @@ The agent is **advisory**. It cannot approve suppliers, commit spending, place p
 
 | Source / integration | Purpose | Current status |
 | --- | --- | --- |
-| **French cereals quotations (XLSX)** | Wheat market benchmark and ingestion prototype | Downloaded; relevant series identified for further normalization |
-| **EU cereals prices (XLSX)** | Alternative or complementary wheat benchmark | Downloaded; suitability and schema still being assessed |
+| **EU cereals prices (XLSX)** | Primary wheat benchmark: Spanish (`ES`) breadmaking common wheat | Downloaded; contains the Spanish series; ingestion not yet built |
+| **French cereals quotations (XLSX)** | Supplementary French wheat indicator | Downloaded; messy headers and `#REF!` cells; optional |
+| **European Commission oilseeds prices (XLSX)** | Primary sunflower oil benchmark (Spain, crude, weekly, EUR/tonne) | Loaded into PostgreSQL (308 observations, 2 market-stage series, quality-flagged) |
 | **European Commission Cereals REST API** | Direct cereals price retrieval | Tested; HTTP 500 errors, **not usable as an MVP dependency** |
-| **Sunflower oil price source** | Sunflower oil market benchmark | **Not yet selected or verified** |
-| **Tavily Search API** | Research and preliminary supplier discovery | Planned; connectivity and limits not yet tested |
-| **GDELT** | News and disruption signals | Planned; connectivity and relevance not yet tested |
-| **OpenAI API** | Language-model synthesis and document embeddings | Planned; model selection pending |
-| **Supabase PostgreSQL + pgvector** | Structured procurement data and document retrieval | Planned; database and pipeline not yet implemented |
+| **Tavily Search API** | Research and preliminary supplier discovery | One connectivity request succeeded (HTTP 200); relevance was mixed |
+| **GDELT DOC 2.0** | News and disruption signals | One connectivity request succeeded (HTTP 200); results were noisy |
+| **OpenAI API** | Language-model synthesis and document embeddings | Core infrastructure; planned; key and model not yet verified |
+| **Supabase PostgreSQL + pgvector** | Structured procurement data and document retrieval | PostgreSQL connectivity verified (`SELECT 1`); migration 001 applied (10 tables, pgvector 0.8.2); no data loaded yet |
 
-
-The final three external tool/API integrations will be confirmed only after working connectivity tests. Downloadable files contribute to the data pipeline but are not automatically counted as live API integrations.
+Tavily and GDELT are the two research APIs; a third research API is not required. OpenAI and Supabase are core infrastructure, and the European Commission files are official price sources ingested into PostgreSQL. FRED, MCP and LLM-as-a-Judge are optional and deferred.
 
 ## Proposed Workflow
 
@@ -141,24 +140,46 @@ The prototype will be evaluated on:
 
 No accuracy score, time saving, ROI, or production reliability is claimed before testing.
 
-## Development Roadmap
+## Scope and Status
+
+Status words are used strictly: **implemented** = code exists and offline tests pass; **tested with mocks** = exercised only against recorded/mocked responses; **tested live** = run against the real service at least once (see `docs/implementation-plan.md` §11–§13); **planned** = not built.
+
+### Supplier intelligence: three separate capabilities
+
+| Capability | Scope | What it means |
+| --- | --- | --- |
+| **A. Internal supplier and contract exposure** | In MVP | Five **fictional** suppliers, their synthetic contracts, approval statuses and demand forecasts represent Bakery Foods Inc.'s simulated internal environment. They are never replaced by or attributed to real companies. |
+| **B. Real alternative-supplier discovery** | In MVP | Tavily finds **real companies** that might supply sunflower oil. They are sourcing leads, not suppliers: always `UNVERIFIED`, attributes only if a source states them, crude vs refined distinguished, independent verification and qualification required. |
+| **C. Public-risk monitoring of existing suppliers** | **Future enhancement, not implemented** | With a client's real supplier master data, the agent could monitor publicly reported supplier-specific events (plant closure, insolvency, strike, sanctions) and map a verified event to contracts and *potentially affected* volume. Not meaningful with fictional suppliers, so it is out of scope. |
+
+### Implemented MVP capabilities
 
 | Capability | Status |
 | --- | --- |
-| Business case and architecture documentation | ✅ Drafted |
-| AI design, evaluation, and failure-test plan | ✅ Drafted |
-| French / EU wheat source feasibility | 🟡 Initial review |
-| Sunflower oil market-data source | 🔜 To verify |
-| Python commodity-data ingestion and PostgreSQL schema | 🔜 Planned |
-| Synthetic supplier, contract, and forecast dataset | 🔜 Planned |
-| LangGraph research and retrieval workflow | 🔜 Planned |
-| Deterministic exposure calculation tests | 🔜 Planned |
-| RAG over procurement documents | 🔜 Planned |
-| n8n request intake and report delivery | 🔜 Planned |
-| Two example reports with supporting evidence | 🔜 Planned |
-| Error-handling tests and execution logs | 🔜 Planned |
-| MCP-enabled research tool | 💡 Optional |
-| Production ERP integration, alerting, and monitoring | 💡 Future work |
+| Fictional internal suppliers, contracts and forecasts (CSV → PostgreSQL, idempotent) | Implemented; loaded in Supabase; read-only use in live runs |
+| Official commodity benchmark (EC Spanish crude sunflower oil, 308 observations, quality-flagged) | Implemented; loaded in Supabase |
+| Deterministic financial exposure (fixed / index-linked / uncovered) | Implemented; offline tests; figures verified in two live runs |
+| External market-risk research (Tavily, GDELT) | Implemented; tested live twice (live-002: Tavily returned results; GDELT returned HTTP 200 with zero articles, cause not yet diagnosed) |
+| Evidence-provenance controls (`basis`, verbatim-quote citations, source tiers, contact redaction, severity indicators, removal of unsupported claims) | Implemented; **tested with mocks only** (added after live-002; not yet run live) |
+| Real alternative-supplier discovery with unverified leads | Implemented; **tested with mocks only** after the remediation (live-002 showed unsupported country attributions, now blocked by validation) |
+| Human-reviewed mitigation recommendations | Implemented; every action requires human approval |
+
+### Planned, not yet implemented
+
+| Capability | Status |
+| --- | --- |
+| Procurement-policy RAG (fictional documents, pgvector) | Planned (table exists, empty; no embeddings) |
+| n8n workflow integration and delivery | Planned |
+| Further report-quality evaluation and a second live evaluation after the remediation | Planned |
+| Two reviewed example reports | Planned |
+
+### Out of scope / potential future enhancements
+
+- Monitoring actual existing suppliers with real supplier master data; supplier-specific disruption-to-contract exposure mapping (potentially affected volume is never presented as confirmed delivery loss or financial loss).
+- Automated supplier qualification or onboarding; live supplier quotations, capacity verification and commercial negotiation.
+- Automatic supplier switching, purchasing or contract execution.
+- Optional FRED integration, MCP tooling, a more sophisticated evaluation system (e.g. LLM-as-a-Judge).
+- Production ERP integration, alerting and monitoring.
 
 ## Tech Stack
 

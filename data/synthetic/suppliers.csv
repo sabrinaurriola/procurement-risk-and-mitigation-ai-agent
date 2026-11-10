@@ -1,0 +1,6 @@
+supplier_id,name,country,ingredients,approval_status,notes,is_synthetic
+SUP-001,Aceites del Sur S.A. (fictional),ES,sunflower_oil,approved,Primary refined sunflower oil supplier,true
+SUP-002,Girasol Iberico S.L. (fictional),ES,sunflower_oil,approved,Secondary supplier; contract ends mid-January,true
+SUP-003,Danube Agri Oils SRL (fictional),RO,sunflower_oil,conditional,Index-linked supply; audit renewal pending,true
+SUP-004,Harinas del Duero S.A. (fictional),ES,wheat,approved,Milling wheat; fixed-price supply,true
+SUP-005,Moulins Atlantique SAS (fictional),FR,wheat,approved,Index-linked milling wheat,true

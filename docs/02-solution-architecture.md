@@ -1,7 +1,8 @@
 # Solution Architecture — Procurement Risk & Mitigation Agent
 
 **Project:** Ironhack AI Consulting Bootcamp · Project 3  
-**Company:** Bakery Foods Inc. (fictional bakery manufacturer)  
+**Company:** Bakery Foods Inc. (fictional industrial bakery manufacturer in Spain; ~800 employees, ~€175M revenue, 3 factories, centralized procurement — fictional assumptions; operating market Spain, configurable)  
+**Update (10 Nov 2026):** Gate B approved the data design — dedicated `procurement` Postgres schema, CSV-first synthetic data, EC Excel price files ingested by Python, Tavily and GDELT as the two research APIs. See `implementation-plan.md` for the current plan; this document remains the proposed architecture.  
 **Scope:** Four-day MVP prototype  
 **Status:** Proposed architecture; implementation and test results to be documented separately
 
@@ -66,6 +67,23 @@ The model interprets evidence and drafts recommendations. **SQL and Python suppl
 | New supplier candidates | External search evidence | Discovery is not qualification, capacity confirmation, or approval |
 
 **External sources under consideration:** World Bank Pink Sheet commodity data, GDELT news data, and Tavily web search. Their coverage, API access, pricing, and suitability for sunflower oil must be checked during implementation. A source that lacks the required commodity or timely evidence should be replaced or excluded, not treated as validated.
+
+## 4a. Supplier intelligence: three separate capabilities
+
+| | Capability | Scope | Data | Output |
+|---|---|---|---|---|
+| **A** | Internal supplier and contract exposure | **In MVP** | Five fictional suppliers, five synthetic contracts, approval statuses and three-month forecasts (Postgres) | Contract coverage, fixed / index-linked / uncovered exposure, supplier-status findings |
+| **B** | Real alternative-supplier discovery | **In MVP** | Tavily results about real companies | Up to three **unverified** sourcing leads (possibly none) |
+| **C** | Public-risk monitoring of existing suppliers | **Future enhancement, not implemented** | A client's real supplier master data + public news | Verified supplier-specific events mapped to *potentially affected* contracts and volumes |
+
+**A** keeps the fictional internal environment intact. Fictional suppliers are never replaced by, or attributed to, real companies, and no invented contract, relationship or purchasing volume is attributed to a real company.
+
+**B** rules: a candidate is a *lead*, not a supplier. Its identity, product type and any country must each be supported by a verbatim quote from a non-social, direct source; unsupported attributes are `unknown`; a country is never inferred from a phone prefix, web domain or vague region ("across Europe"). Crude and refined food-grade sunflower oil are distinguished. Capacity, price, availability, certification and suitability are never asserted. Fewer than three candidates (including zero) is the correct output when evidence is thin. Independent procurement verification and qualification are required before any action, and a supplier replacement is never recommended on external search results alone.
+
+**C** (not built) business value: earlier warning of a supplier-specific disruption (plant closure, insolvency, strike, sanctions, operational incident) and a first estimate of which contracts and volumes could be affected. Prerequisites: real supplier master data (legal entities, sites, products), entity resolution so news about the right company is matched, source-verification rules, contract and volume data, and an owner for the alerts. Caveats: the existing suppliers here are fictional, so external research about them would be meaningless and public news about a real company must never be presented as concerning a fictional one; and *potentially affected contractual volume* must never be confused with confirmed delivery loss or financial loss.
+
+### Evidence provenance rules (apply to every finding and recommendation)
+Each risk, mitigation and action declares its `basis`: `internal_model` (cites internal records or calculation outputs only), `external_evidence` (cites retrieved sources only) or `combined` (cites both). A citation is an evidence ID plus a verbatim quote that must appear in that source and relate to the claim; the source must be judged direct or contextual, must not be social media, and each finding needs at least one direct official or trade-press source (commercial, unrated and contextual sources may accompany but never carry a finding). Severity for internal categories equals a deterministic documented indicator; `high` for an external finding needs two distinct strong sources. Claims that cannot be verified after one repair attempt are **removed and listed in the report**, never kept with a decorative citation. Third-party emails and phone numbers are removed before snippets are stored or sent to the model.
 
 ## 5. AI, rules, and human responsibilities
 

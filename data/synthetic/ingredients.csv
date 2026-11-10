@@ -1,0 +1,3 @@
+ingredient_code,display_name,unit,benchmark_series_key,benchmark_note
+sunflower_oil,Sunflower oil,tonne,EC_OILSEEDS|Crude sunflower oil|Standard|ES|Average|DEPPROC||EUR|tonne,Crude standard sunflower oil (Spain); not necessarily refined food-grade oil
+wheat,Wheat (milling),tonne,EC_CEREALS|Breadmaking common wheat|BLTPAN|ES||DEPSILO|Navarra|EUR|tonne,Spanish breadmaking wheat grain price; not a flour price. Quotation place to be confirmed by the ingestion adapter

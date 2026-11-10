@@ -1,0 +1,7 @@
+ingredient_code,period_month,forecast_volume_t,forecast_version,generated_on,is_synthetic
+sunflower_oil,2026-12-01,400,F-2026-11,2026-11-10,true
+sunflower_oil,2027-01-01,420,F-2026-11,2026-11-10,true
+sunflower_oil,2027-02-01,410,F-2026-11,2026-11-10,true
+wheat,2026-12-01,1200,F-2026-11,2026-11-10,true
+wheat,2027-01-01,1250,F-2026-11,2026-11-10,true
+wheat,2027-02-01,1200,F-2026-11,2026-11-10,true
