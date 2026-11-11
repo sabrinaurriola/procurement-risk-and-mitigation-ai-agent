@@ -9,7 +9,7 @@ Provenance rules
 * A citation is an evidence_id PLUS a verbatim quote from that source; an id alone is never accepted as support."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -22,6 +22,14 @@ class AssessmentRequest(BaseModel):
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
     ingredient: str
     horizon_months: int = Field(ge=1, le=6)
+    assessment_date: date | None = None     # default: today. Overriding is for reproducible demos/backtests and is flagged in the report
+
+    @field_validator("assessment_date")
+    @classmethod
+    def _date_in_range(cls, v: date | None) -> date | None:
+        if v is not None and not (date.today() - timedelta(days=365) <= v <= date.today() + timedelta(days=90)):
+            raise ValueError("assessment_date must be within 365 days before and 90 days after today")
+        return v
 
     @field_validator("ingredient")
     @classmethod
@@ -38,6 +46,11 @@ Basis = Literal["internal_model", "external_evidence", "combined"]
 class Citation(BaseModel):
     evidence_id: str
     quote: str                     # verbatim text copied from that source's title or snippet
+
+
+class PolicyCitation(BaseModel):
+    policy_ref: str                # doc_id#chunk_index of a RETRIEVED passage
+    quote: str                     # verbatim text copied from that passage
 
 
 class Risk(BaseModel):
@@ -61,6 +74,7 @@ class Mitigation(BaseModel):
     addresses: list[str]           # risk_ids this option responds to
     citations: list[Citation]
     internal_refs: list[str]
+    policy_citations: list[PolicyCitation]   # fictional internal policy passages, when the option rests on a policy
 
 
 class SupplierCandidate(BaseModel):
@@ -85,6 +99,7 @@ class Action(BaseModel):
     addresses: list[str]
     citations: list[Citation]
     internal_refs: list[str]
+    policy_citations: list[PolicyCitation]
 
 
 class DraftReport(BaseModel):
@@ -160,6 +175,19 @@ class ScenarioRow(BaseModel):
     pct_of_baseline: str
 
 
+ROUNDING_NOTE = ("All EUR figures are computed at full precision and rounded to cents independently for display, so a displayed scenario cost can differ "
+                 "from the displayed baseline plus the displayed incremental exposure by EUR 0.01; no calculation uses a rounded value.")
+
+
+class AttributionRow(BaseModel):
+    component: Literal["uncovered_demand", "index_linked", "fixed_price"]
+    label: str
+    detail: str
+    tonnes: str
+    incremental_exposure_eur: str
+    share_pct: str
+
+
 class FinancialSection(BaseModel):
     status: Literal["available", "unavailable"]
     months: list[MonthRow]
@@ -171,6 +199,9 @@ class FinancialSection(BaseModel):
     assumptions: str
     unavailable_reasons: list[str]
     disclaimer: str
+    attribution_shock: str = "+10%"
+    attribution: list[AttributionRow] = []      # what drives the hypothetical shock (deterministic)
+    rounding_note: str = ROUNDING_NOTE
 
 
 class SupplierExposure(BaseModel):
@@ -184,6 +215,24 @@ class SupplierExposure(BaseModel):
     valid_from: date
     valid_to: date
     ends_within_horizon: bool
+
+
+class PolicyPassageOut(BaseModel):
+    policy_ref: str
+    doc_id: str
+    chunk_index: int
+    doc_title: str
+    doc_type: str
+    content: str
+    score: float | None
+
+
+class PolicyContext(BaseModel):
+    """Retrieved fictional policy passages: internal context, NOT proof of regulatory compliance."""
+    status: Literal["ok", "fallback", "unavailable"]
+    method: str
+    note: str | None
+    passages: list[PolicyPassageOut]
 
 
 class Indicator(BaseModel):
@@ -205,6 +254,7 @@ class Report(BaseModel):
     indicators: list[Indicator]
     benchmark: BenchmarkSection
     financial: FinancialSection
+    policy: PolicyContext
     supplier_exposure: list[SupplierExposure]
     evidence: list[EvidenceItem]
     source_status: dict[str, str]
@@ -231,7 +281,9 @@ class Execution(BaseModel):
 
 class AssessmentResponse(BaseModel):
     """Envelope returned to n8n: check `status`, not just the HTTP code."""
+    schema_version: str = "1.1"
     request_id: str
+    assessment_date: date | None = None
     status: Literal["completed", "partial", "failed"]
     report_title: str | None
     report_markdown: str | None

@@ -20,12 +20,13 @@ def render_markdown(r: Report, status: str) -> str:
         L += ["", "> **MOCK RUN — fixture data, not live market intelligence.**"]
     if r.warnings:
         L += ["", "## Warnings"] + [f"- {w}" for w in r.warnings]
-    if r.removed_claims:
-        L += ["", "## Claims removed because their support could not be verified"] + [f"- {x}" for x in r.removed_claims]
     if r.missing_data:
         L += ["", "## Missing data"] + [f"- {w}" for w in r.missing_data]
-    L += ["", "## Executive summary", r.draft.executive_summary, "", "_Interpretation text is AI-generated and must be reviewed; "
-          "all figures below are calculated by deterministic code from the stated inputs._"]
+    L += ["", "## Executive summary", r.draft.executive_summary, "", "_The summary is assembled by code from the validated findings and the "
+          "deterministic figures. Interpretation text in the findings below is AI-generated and must be reviewed._"]
+    if r.removed_claims:
+        L += ["", "## Unverified concerns - drafted claims removed because their support could not be verified",
+              "_These are not findings. A person may still want to investigate them._"] + [f"- {x}" for x in r.removed_claims]
 
     L += ["", "## How to read the findings",
           "- **Basis `internal_model`:** derived from the fictional internal contracts, forecasts, supplier records or the calculation outputs.",
@@ -53,6 +54,12 @@ def render_markdown(r: Report, status: str) -> str:
               f"uncovered {f.total_uncovered_t} t)", "", "### Incremental price-shock exposure vs baseline",
               _table(["Benchmark shock", "Scenario cost (EUR)", "Incremental exposure (EUR)", "% of baseline"],
                      [[s.shock, s.scenario_cost_eur, s.incremental_exposure_eur, s.pct_of_baseline] for s in f.scenarios])]
+    if f.status == "available" and f.attribution:
+        L += ["", f"### What drives the hypothetical {f.attribution_shock} sensitivity (deterministic split; a scenario, not a forecast)",
+              _table(["Cost driver", "Volume in the model (t)", "Incremental exposure (EUR)", "Share"],
+                     [[a.detail, a.tonnes, a.incremental_exposure_eur, a.share_pct] for a in f.attribution])]
+    if f.status == "available":
+        L += ["", f"_{f.rounding_note}_"]
     if f.months:
         shocks = list(f.months[0].incremental_exposure_eur)
         L += ["", "### Contract coverage and monthly detail (coverage changes are separate from price shocks)",
@@ -78,9 +85,23 @@ def render_markdown(r: Report, status: str) -> str:
     def cites(cs) -> str:
         return " ".join(f"[{c.evidence_id}: \"{c.quote}\"]" for c in cs)
 
+    def pol(cs) -> str:
+        return " ".join(f"[{c.policy_ref}: \"{c.quote}\"]" for c in cs)
+
     def refs(rs) -> str:
         return (" Internal basis: " + ", ".join(f"`{x}`" for x in rs) + ".") if rs else ""
 
+    pc = r.policy
+    L += ["", "## Internal policy context (fictional policy documents)"]
+    if pc.status == "unavailable":
+        L.append(f"**UNAVAILABLE — no policy guidance is given.** {pc.note or ''}")
+    else:
+        L.append(f"Retrieval: **{pc.method}**" + (" (fallback)" if pc.status == "fallback" else "") + (f" — {pc.note}" if pc.note else "")
+                 + ". These passages come from fictional internal documents; they explain internal process and are not evidence of real regulatory "
+                   "compliance or of a supplier's current compliance.")
+        for p in pc.passages:
+            text = " ".join(p.content.split())
+            L.append(f"- **[{p.policy_ref}]** {p.doc_title} ({p.doc_type.replace('_', ' ')}): \"{text[:230]}{'…' if len(text) > 230 else ''}\"")
     L += ["", "## Risks"]
     L += [f"- **{x.risk_id} · {x.title}** — {x.category.replace('_', ' ')} · basis `{x.basis}` · severity **{x.severity.upper()}** "
           f"({x.severity_basis}) · {x.time_relevance}\n  {x.description}{refs(x.internal_refs)} {cites(x.citations)}" for x in d.risks] or [
@@ -89,7 +110,7 @@ def render_markdown(r: Report, status: str) -> str:
         L.append("- **No external market or supply risk is asserted:** no direct official or trade-press evidence supported one.")
     L += ["", "## Mitigation options"]
     L += [f"- {m.option} ({m.applies_to.replace('_', ' ')}; basis `{m.basis}`; addresses {', '.join(m.addresses)}): {m.rationale}"
-          f"{refs(m.internal_refs)} {cites(m.citations)}" for m in d.mitigation_options] or ["- None proposed."]
+          f"{refs(m.internal_refs)} {cites(m.citations)} {pol(m.policy_citations)}" for m in d.mitigation_options] or ["- None proposed."]
     L += ["", "## Alternative-supplier leads — UNVERIFIED (real companies found by search; not approved, qualified or capacity-confirmed)"]
     if d.supplier_candidates:
         for c in d.supplier_candidates:
@@ -105,7 +126,7 @@ def render_markdown(r: Report, status: str) -> str:
         L.append("- No candidate is reported: the retrieved evidence was insufficient to identify a real supplier lead with supported attributes.")
     L += ["", "## Recommended next steps (all require human review and approval)"]
     L += [f"- {a.action} (basis `{a.basis}`; addresses {', '.join(a.addresses)}) — {a.rationale} _Next step: {a.next_step}_"
-          f"{refs(a.internal_refs)} {cites(a.citations)}" for a in d.recommended_actions] or ["- None."]
+          f"{refs(a.internal_refs)} {cites(a.citations)} {pol(a.policy_citations)}" for a in d.recommended_actions] or ["- None."]
     L += ["", "## Uncertainties"]
     L += [f"- {u}" for u in d.uncertainties] or ["- None stated."]
     L += ["", "## Research status"] + [f"- {k}: {v}" for k, v in r.source_status.items()]

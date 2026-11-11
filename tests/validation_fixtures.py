@@ -2,7 +2,7 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
-from src.agent.schemas import (Action, Citation, DraftReport, EvidenceItem, Indicator, Mitigation, Risk, SupplierCandidate)
+from src.agent.schemas import (Action, Citation, DraftReport, EvidenceItem, Indicator, Mitigation, PolicyCitation, Risk, SupplierCandidate)
 from src.agent.validation import ValidationContext
 
 TODAY = date(2026, 11, 10)
@@ -45,7 +45,9 @@ INDICATORS = [
 ]
 CTX = ValidationContext(set(REFS), INDICATORS)
 MONEY = {Decimal("1961496.55"), Decimal("107744.17"), Decimal("1457.40"), Decimal("150")}
-FACTS = '{"financial": {"baseline_modelled_cost_eur": "1,961,496.55", "total_uncovered_t": "451.290"}}'
+FACTS = ('{"financial": {"baseline_modelled_cost_eur": "1,961,496.55", "total_uncovered_t": "451.290"}, "severity_indicators": ['
+         '{"value": "peak uncovered share 46.3% in 2027-02 (190.000 t of 410.000 t forecast)", "rule": "peak uncovered share >= 50% high; >= 25% medium; > 0% low"}, '
+         '{"value": "SUP-003 (conditional): 46.2% of contract-committed volume over the horizon"}]}')
 
 
 def cite(i="E1", q=Q_SUPPLY):
@@ -81,7 +83,8 @@ def sup_risk(**kw):
 
 def mitigation(**kw):
     base = dict(option="Review contract coverage for the months with the largest uncovered volume", rationale="Uncovered volume carries market exposure.",
-                applies_to="contract_strategy", basis="internal_model", addresses=["R1"], citations=[], internal_refs=["INT:indicator:coverage"])
+                applies_to="contract_strategy", basis="internal_model", addresses=["R1"], citations=[], internal_refs=["INT:indicator:coverage"],
+                policy_citations=[])
     base.update(kw)
     return Mitigation(**base)
 
@@ -89,7 +92,7 @@ def mitigation(**kw):
 def action(**kw):
     base = dict(action="Decide whether to extend contract coverage", rationale="The coverage table shows uncovered tonnes.",
                 next_step="Procurement manager reviews renewal options.", requires_human_approval=True, basis="internal_model",
-                addresses=["R1"], citations=[], internal_refs=["INT:indicator:coverage"])
+                addresses=["R1"], citations=[], internal_refs=["INT:indicator:coverage"], policy_citations=[])
     base.update(kw)
     return Action(**base)
 

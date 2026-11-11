@@ -21,6 +21,7 @@ class Limits:
     max_results_per_call: int = 6
     max_candidates: int = 3            # unverified supplier candidates
     max_repairs: int = 1               # one bounded report-repair attempt
+    policy_top_k: int = 3              # passages retrieved per theme query (merged, so up to 4 x 3)
 
 
 @dataclass(frozen=True)

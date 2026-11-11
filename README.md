@@ -12,7 +12,7 @@ It is intended for raw-material procurement managers who need to understand mark
 
 The business scenario uses **Bakery Foods Inc.**, a fictional industrial bakery manufacturer headquartered in **Spain** (operating market, configurable), with Spanish and European suppliers. Fictional profile: ~800 employees, ~€175M annual revenue, 3 factories in Spain, a centralized procurement team, and key ingredients wheat/flour, sunflower oil and sugar. These are invented assumptions; the MVP covers sunflower oil and wheat, and exposure is calculated from synthetic contracts, forecasts and benchmarks, not from revenue.
 
-> **Project status (10 November 2026):** Business case, solution architecture, evaluation plan and implementation plan ([docs/implementation-plan.md](docs/implementation-plan.md)) are drafted. Verified so far: Supabase PostgreSQL connectivity (`SELECT 1`), one successful Tavily and one GDELT request, and 79 offline tests (synthetic data, contract constraints, series keys, migration planning, both ingestion pipelines). A draft database schema and synthetic CSVs exist but have **not** been applied to the database. The ingestion pipelines, LangGraph agent, n8n workflow and end-to-end reports are **not yet implemented or validated**.
+> **Project status (11 November 2026, Day 3):** data layer, deterministic exposure engine, a bounded LangGraph workflow, evidence-provenance controls and a policy-RAG implementation are built. Verification: **490 offline tests** pass (47 opt-in skipped) and the opt-in read-only database tier passes (**537**, incl. the populated policy table); two live assessments were run on 10 Nov (before the provenance fixes and RAG) and one GDELT diagnostic on 11 Nov. The 25 fictional policy chunks are loaded and embedded in Supabase (`text-embedding-3-small`, 1,536 dims) and retrieval was checked against real pgvector (11 Nov, see implementation plan §16). One live end-to-end assessment of the current code (live-003, 11 Nov) finished PARTIAL (GDELT 429; 6 unverifiable items removed), structural audit 10/10, with content-quality defects listed in implementation plan §17. Targeted offline corrections for those defects (price direction, hypothetical shocks, other-market prices, SUP-003 escalation, unattributed cadence wording) are implemented and tested offline only (490 passed; 537 with the read-only database tier), **not yet re-tested with a live model** (plan section 18). POL-001 and ASM-003 were aligned on the conditional-supplier approval sequence and re-embedded (2 chunks, plan section 19). A final live run (live-004, 11 Nov) finished PARTIAL with correct figures, price direction and SUP-003 governance, but lost one risk and one action to the strict rules and left an unsupported sentence in the summary (plan section 20; CONDITIONAL GO). Those gaps were then corrected offline (plan section 21; not re-tested live). **Day 3 closure: CONDITIONAL GO for Day 4** — see [docs/day3-checkpoint.md](docs/day3-checkpoint.md) for the full snapshot and handoff. **Not yet done:** FastAPI, n8n. See [docs/implementation-plan.md](docs/implementation-plan.md) §6, §14–15 and [docs/day3-checkpoint.md](docs/day3-checkpoint.md).
 
 ## The Problem
 
@@ -168,10 +168,10 @@ Status words are used strictly: **implemented** = code exists and offline tests 
 
 | Capability | Status |
 | --- | --- |
-| Procurement-policy RAG (fictional documents, pgvector) | Planned (table exists, empty; no embeddings) |
-| n8n workflow integration and delivery | Planned |
+| Procurement-policy RAG: loading 25 chunks and embeddings into pgvector | **Loaded and embedded** (6 documents / 25 chunks, one embedding batch of 1,586 tokens); real pgvector retrieval verified; offline workflow with real retrieval verified; **not yet used in a live LangGraph run** |
+| n8n workflow integration and delivery | Planned; interface specified in [docs/api-specification.md](docs/api-specification.md) |
 | Further report-quality evaluation and a second live evaluation after the remediation | Planned |
-| Two reviewed example reports | Planned |
+| Two reviewed example reports | Scenarios A (normal) and B (stale-data limitation) defined and passing on mock data ([docs/demo-scenarios.md](docs/demo-scenarios.md)); live reports pending approvals |
 
 ### Out of scope / potential future enhancements
 
@@ -202,3 +202,11 @@ Procurement and supply-chain professionals interested in early risk assessment, 
 ## Disclaimer
 
 **Bakery Foods Inc. and its internal procurement records are fictional.** The project is an experimental decision-support prototype, not a live procurement system. External sources may be incomplete or outdated; supplier candidates require independent qualification. Financial impact figures are hypothetical scenarios unless backed by explicitly identified inputs. All procurement decisions remain subject to human review and approval.
+
+## Verification status (11 Nov 2026)
+| Level | Result |
+|---|---|
+| Offline (mocks) | 490 passed, 47 opt-in skipped |
+| Real read-only database | 48 passed (constraint tests run inside rolled-back transactions); row counts unchanged |
+| Live services | 2 assessments on 10 Nov (before the latest changes), 1 GDELT diagnostic on 11 Nov: GDELT returned HTTP 429 twice, then HTTP 200 with no articles |
+| Independent report audit | 10/10 on the mock scenarios; verifies structure and provenance, **not** the business quality of real LLM text |

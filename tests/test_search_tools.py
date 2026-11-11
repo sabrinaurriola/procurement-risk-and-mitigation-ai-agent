@@ -247,3 +247,68 @@ def test_requested_parameters_are_recorded_without_credentials():
     tool, _ = tavily(lambda req: httpx.Response(200, json=ok_body()))
     res = search(tool)
     assert res.params == {"topic": "news", "time_range": "year", "max_results": 5} and SECRET not in repr(res.params)
+
+
+# ── GDELT diagnostics: durations, raw response metadata, verdicts ──
+def test_attempt_log_records_elapsed_time_per_attempt():
+    codes = iter([503, 200])
+    tool, _ = tavily(lambda req: httpx.Response(next(codes), json={"results": []}))
+    res = search(tool)
+    assert all(isinstance(a["elapsed_s"], float) and a["elapsed_s"] >= 0 for a in res.attempt_log) and len(res.attempt_log) == 2
+
+
+def test_gdelt_records_non_secret_request_and_raw_response_metadata():
+    tool, _, _ = gdelt(lambda req: httpx.Response(200, json={"articles": []}, headers={"content-type": "application/json"}))
+    res = search(tool, '"sunflower oil"')
+    assert res.params["query"] == '"sunflower oil"' and res.params["timespan"] == "3months" and res.params["mode"] == "artlist"
+    assert res.params["last_response"]["content_type"].startswith("application/json") and res.params["last_response"]["bytes"] > 0
+
+
+def test_diagnostic_verdicts_keep_connectivity_retrieval_and_usable_evidence_apart():
+    from datetime import date
+    from src.tools import gdelt_diagnostic as gd
+    today = date(2026, 11, 11)
+    body = {"articles": [{"url": "https://a.example/1", "title": "Sunflower oil prices", "seendate": "20261105T000000Z", "language": "English"},
+                         {"url": "https://a.example/2", "title": "Regional festival", "seendate": "20261104T000000Z", "language": "English"},
+                         {"url": "https://a.example/3", "title": "Sunflower oil in French", "seendate": "20261103T000000Z", "language": "French"}]}
+    tool, _, _ = gdelt(lambda req: httpx.Response(200, json=body))
+    r = gd.run(tool, today)
+    assert r["integration"]["ok"] and r["integration"]["http_status"] == 200 and r["retrieved"]["articles"] == 3
+    assert r["retained"]["passed_prefilter"] == 1 and r["retained"]["rejected"] == {"NO_INGREDIENT_MATCH": 1, "UNSUPPORTED_LANGUAGE": 1}
+    assert r["retained"]["relevance_judged"] is False and "RELEVANCE NOT ASSESSED".lower() in r["verdict"].lower()
+    empty, _, _ = gdelt(lambda req: httpx.Response(200, json={"articles": []}))
+    assert "NO ARTICLES RETURNED" in gd.run(empty, today)["verdict"]
+    down, _, _ = gdelt(lambda req: httpx.Response(503))
+    assert gd.run(down, today)["verdict"].startswith("INTEGRATION FAILURE (HTTP_503)")
+    allout, _, _ = gdelt(lambda req: httpx.Response(200, json={"articles": [body["articles"][1]]}))
+    assert "NONE PASSED THE PRE-FILTER" in gd.run(allout, today)["verdict"]
+
+
+def test_gdelt_empty_json_object_is_reported_as_no_data_not_as_no_coverage():
+    """Live diagnostic of 11 Nov 2026: HTTP 200, 2-byte body '{}', after two HTTP 429 responses."""
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        return httpx.Response(429, headers={"Retry-After": "7"}) if len(calls) < 3 else httpx.Response(200, json={})
+
+    tool, _, _ = gdelt(handler)
+    res = search(tool, '"sunflower oil"')
+    assert res.ok and res.items == [] and res.attempts == 3 and res.http_status == 200
+    assert [a["http_status"] for a in res.attempt_log] == [429, 429, 200] and [a["retry_after_s"] for a in res.attempt_log[:2]] == [7.0, 7.0]
+    assert "empty JSON object {}" in res.note and "NOT evidence that no coverage exists" in res.note
+    assert res.params["last_response"]["bytes"] == 2
+
+
+def test_gdelt_attempt_limit_is_configurable_to_one_retry():
+    import httpx
+    from src.tools.search import GdeltTool
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        return httpx.Response(429, headers={"Retry-After": "0"})
+
+    tool = GdeltTool(client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None, min_interval=0, max_attempts=2)
+    res = tool.search("sunflower oil", kind="news", lookback_days=7, max_results=5)
+    assert not res.ok and res.attempts == 2 and len(calls) == 2

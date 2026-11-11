@@ -118,23 +118,26 @@ def _error_code(exc: BaseException) -> str:
 
 
 def _call_with_retry(fn: Callable[[], list[RawResult]], sleep: Callable[[float], None],
-                     status: Callable[[], int | None] = lambda: None) -> ToolResult:
+                     status: Callable[[], int | None] = lambda: None, max_attempts: int = MAX_ATTEMPTS) -> ToolResult:
     attempts = 0
     log: list[dict] = []
-    retrying = Retrying(stop=stop_after_attempt(MAX_ATTEMPTS), retry=retry_if_exception(_is_transient),
+    retrying = Retrying(stop=stop_after_attempt(max_attempts), retry=retry_if_exception(_is_transient),
                         wait=_retry_wait(sleep), sleep=sleep, reraise=True)
     try:
         for attempt in retrying:
             with attempt:
                 attempts += 1
+                t0 = time.monotonic()
                 try:
                     items = fn()
                 except Exception as exc:  # noqa: BLE001 - recorded, then re-raised for the retry policy
                     log.append({"attempt": attempts, "outcome": "error", "code": _error_code(exc),
-                                "retried": _is_transient(exc) and attempts < MAX_ATTEMPTS, "http_status": status()})
+                                "retried": _is_transient(exc) and attempts < max_attempts, "http_status": status(),
+                                "retry_after_s": getattr(exc, "retry_after", None), "elapsed_s": round(time.monotonic() - t0, 3)})
                     raise
                 log.append({"attempt": attempts, "outcome": "ok", "code": None, "retried": False,
-                            "http_status": status(), "results": len(items)})
+                            "http_status": status(), "results": len(items),
+                            "elapsed_s": round(time.monotonic() - t0, 3)})
         return ToolResult(True, items, None, attempts, attempt_log=log)
     except Exception as exc:  # noqa: BLE001 - converted to a visible, sanitised failure
         return ToolResult(False, [], _error_code(exc), attempts, attempt_log=log)
@@ -208,13 +211,15 @@ class GdeltTool:
 
     def __init__(self, client: httpx.Client | None = None, timeout: float = 30.0,
                  sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
-                 min_interval: float | None = None):
+                 min_interval: float | None = None, max_attempts: int = MAX_ATTEMPTS):
+        self._max_attempts = max_attempts
         self._client = client or make_client(timeout)
         self._sleep, self._clock = sleep, clock
         self._min_interval = self.MIN_INTERVAL if min_interval is None else min_interval
         self._last: float | None = None
         self._status: int | None = None
         self._note: str | None = None
+        self._meta: dict | None = None
 
     def search(self, query: str, *, kind: str, lookback_days: int, max_results: int) -> ToolResult:
         if self._last is not None:
@@ -223,13 +228,14 @@ class GdeltTool:
                 self._sleep(wait)
         params = {"query": query, "mode": "artlist", "format": "json", "maxrecords": max_results,
                   "timespan": f"{max(1, round(lookback_days / 30))}months" if lookback_days > 30 else f"{lookback_days}d"}
-        self._status, self._note = None, None
+        self._status, self._note, self._meta = None, None, None
 
         def call() -> list[RawResult]:
             self._status = None
             self._last = self._clock()
             resp = self._client.get(self.URL, params=params)
             self._status = resp.status_code
+            self._meta = {"content_type": resp.headers.get("content-type"), "bytes": len(resp.content)}
             err = _status_error(resp)
             if err:
                 raise err
@@ -242,6 +248,10 @@ class GdeltTool:
                     self._note = "HTTP 200 with an empty body (GDELT can return this when nothing matches or a query is rejected)"
                     return []
                 raise _Permanent("BAD_RESPONSE") from exc
+            if data == {}:
+                self._note = ("HTTP 200 with an empty JSON object {} - GDELT returned no data. This is NOT evidence that no coverage exists "
+                              "(it can also follow throttling or an unsupported window)")
+                return []
             if not isinstance(data, dict) or "articles" not in data:
                 keys = sorted(data)[:6] if isinstance(data, dict) else type(data).__name__
                 self._note = f"HTTP 200 JSON without an 'articles' key (keys: {keys})"
@@ -252,7 +262,7 @@ class GdeltTool:
             self._note = None if items else "HTTP 200 with an empty 'articles' list"
             return items
 
-        res = _call_with_retry(call, self._sleep, lambda: self._status)
+        res = _call_with_retry(call, self._sleep, lambda: self._status, self._max_attempts)
         res.http_status, res.note = self._status, (self._note if res.ok else None)
-        res.params = {"timespan": params["timespan"], "maxrecords": max_results}
+        res.params = {"query": query, "timespan": params["timespan"], "maxrecords": max_results, "mode": "artlist", "last_response": self._meta}
         return res

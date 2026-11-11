@@ -13,9 +13,19 @@ def test_workflow_on_real_database_data_with_mocked_research():
     from src.agent.graph import Deps, run_assessment
     from src.agent.mock import DemoLLM, MockSearch
     today = date(2026, 11, 10)
-    deps = Deps(PostgresData(), DemoLLM(), MockSearch("tavily", today), MockSearch("gdelt", today), today=lambda: today, mock=True)
+    from src.rag.retrieve import PostgresPolicyRetriever
+    deps = Deps(PostgresData(), DemoLLM(), MockSearch("tavily", today), MockSearch("gdelt", today), policy=PostgresPolicyRetriever(None),
+                today=lambda: today, mock=True)
     resp, _ = run_assessment({"request_id": "db-test", "ingredient": "sunflower_oil", "horizon_months": 3}, deps)
-    assert resp.status == "completed", resp.error
+    # No embedder here, so a populated table is searched by full-text (visible fallback); an empty table is a visible limitation.
+    from src.db.preflight import connect
+    with connect() as conn:
+        loaded = conn.execute("SELECT count(*) FROM procurement.policy_chunks").fetchone()[0]
+    if loaded:
+        assert resp.status == "completed" and resp.report.policy.status == "fallback", resp.error
+        assert any(w.startswith("POLICY_RETRIEVAL_FALLBACK") for w in resp.warnings)
+    else:
+        assert resp.status == "partial" and any(w.startswith("POLICY_CONTEXT_UNAVAILABLE") for w in resp.warnings), resp.error
     r = resp.report
     assert r.benchmark.price_eur_per_tonne == "1,457.40" and str(r.benchmark.period_end) == "2026-10-25"
     assert r.benchmark.excluded_observations.get("OUTLIER_VS_MEDIAN") == 2

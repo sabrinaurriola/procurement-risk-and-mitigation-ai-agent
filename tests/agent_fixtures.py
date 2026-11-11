@@ -6,7 +6,7 @@ from datetime import date
 from src.agent.config import Limits
 from src.agent.data import InternalData, StaticData, SupplierInfo
 from src.agent.graph import Deps
-from src.agent.mock import DemoLLM, MockSearch
+from src.agent.mock import DemoLLM, MockSearch, build_mock_policy
 from src.agent.schemas import RefinedQueries
 from tests.calc_fixtures import KEY, benchmark_history, contracts, forecasts
 
@@ -87,8 +87,8 @@ class EmptySearch:
                                            TODAY, None, query, kind)], None, 1)
 
 
-def deps(llm=None, tavily="mock", gdelt="mock", data=None, limits=None, clock=None, today=TODAY, mock=True) -> Deps:
-    return Deps(data=data or StaticData(internal()), llm=llm or ScriptedLLM(),
+def deps(llm=None, tavily="mock", gdelt="mock", data=None, limits=None, clock=None, today=TODAY, mock=True, policy="mock") -> Deps:
+    return Deps(data=data or StaticData(internal()), llm=llm or ScriptedLLM(), policy=build_mock_policy() if policy == "mock" else policy,
                 tavily=MockSearch("tavily", today) if tavily == "mock" else tavily,
                 gdelt=MockSearch("gdelt", today) if gdelt == "mock" else gdelt,
                 limits=limits or Limits(), clock=clock or FakeClock(), today=lambda: today, mock=mock)

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from src.agent.config import IngredientProfile
 from src.agent.data import InternalData
-from src.agent.schemas import (BenchmarkSection, FinancialSection, Indicator, MonthRow, ScenarioRow, SupplierExposure)
+from src.agent.schemas import (AttributionRow, BenchmarkSection, FinancialSection, Indicator, MonthRow, PolicyContext, PolicyPassageOut, ScenarioRow,
+                               SupplierExposure)
 from src.calculations.exposure import ExposureResult, round_money
 
 
@@ -23,6 +24,7 @@ def horizon_months(as_of: date, n: int) -> list[date]:
     return out
 
 
+D = Decimal
 money = lambda d: f"{round_money(d):,.2f}"  # noqa: E731
 tonnes = lambda d: f"{d:,.3f}"  # noqa: E731
 label = lambda s: f"{s:+.0%}"  # noqa: E731
@@ -36,6 +38,36 @@ def benchmark_section(calc: ExposureResult, profile: IngredientProfile) -> Bench
                             period_start=b.period_start, period_end=b.period_end, age_days=b.age_days,
                             max_age_days=b.max_age_days, excluded_observations=dict(b.excluded),
                             reasons=list(b.reasons), caveat=profile.benchmark_caveat)
+
+
+ATTRIBUTION_SHOCK = D("0.10")
+_COMPONENTS = (("uncovered_demand", "uncovered demand (priced at benchmark plus spot premium)"),
+               ("index_linked", "index-linked contract(s)"), ("fixed_price", "fixed-price contracts"))
+
+
+def attribution_rows(calc: ExposureResult, shock: Decimal = ATTRIBUTION_SHOCK) -> list[AttributionRow]:
+    """Split the incremental exposure of one benchmark shock by cost driver, from the engine's own cost lines (no estimation)."""
+    if not calc.totals or shock not in calc.assumptions.shocks:
+        return []
+    kinds = {"uncovered_demand": "uncovered", "index_linked": "index_linked", "fixed_price": "fixed"}
+    inc = {k: D(0) for k in kinds}
+    vol = {k: D(0) for k in kinds}
+    ids: dict[str, set[str]] = {k: set() for k in kinds}
+    for m in calc.months:
+        for line in m.lines:
+            key = next(k for k, v in kinds.items() if v == line.kind)
+            inc[key] += line.incremental[shock]
+            vol[key] += line.volume_t
+            if line.contract_id:
+                ids[key].add(line.contract_id)
+    total = sum(inc.values(), D(0))
+    rows = []
+    for key, name in _COMPONENTS:
+        share = (inc[key] / total * 100) if total else D(0)
+        detail = name + (" - " + ", ".join(sorted(ids[key])) if ids[key] else "")
+        rows.append(AttributionRow(component=key, label=name, detail=detail, tonnes=tonnes(vol[key]), incremental_exposure_eur=money(inc[key]),
+                                   share_pct=f"{share.quantize(D('0.1'), rounding=ROUND_HALF_UP)}%"))
+    return rows
 
 
 def financial_section(calc: ExposureResult) -> FinancialSection:
@@ -60,7 +92,7 @@ def financial_section(calc: ExposureResult) -> FinancialSection:
                             total_contract_commitments_t=tonnes(t.committed_t) if t else None,
                             total_uncovered_t=tonnes(t.uncovered_t) if t else None,
                             assumptions=calc.assumptions.description, unavailable_reasons=list(calc.unavailable_reasons),
-                            disclaimer=calc.disclaimer)
+                            disclaimer=calc.disclaimer, attribution_shock=label(ATTRIBUTION_SHOCK), attribution=attribution_rows(calc))
 
 
 def supplier_exposure(internal: InternalData, ingredient: str, months: list[date]) -> list[SupplierExposure]:
@@ -181,9 +213,22 @@ def internal_refs(calc: ExposureResult, internal: InternalData, ingredient: str,
     return refs
 
 
+def policy_map(result) -> dict[str, str]:
+    """policy_ref -> passage text for the retrieved passages (empty when retrieval failed)."""
+    return {p.policy_ref: p.content for p in result.passages} if result is not None else {}
+
+
+def policy_context(result) -> PolicyContext:
+    if result is None:
+        return PolicyContext(status="unavailable", method="none", note="policy retrieval was not run", passages=[])
+    return PolicyContext(status=result.status, method=result.method, note=result.note,
+                         passages=[PolicyPassageOut(policy_ref=p.policy_ref, doc_id=p.doc_id, chunk_index=p.chunk_index, doc_title=p.doc_title,
+                                                    doc_type=p.doc_type, content=p.content, score=p.score) for p in result.passages])
+
+
 def facts_for_llm(benchmark: BenchmarkSection, financial: FinancialSection, suppliers: list[SupplierExposure],
                   warnings: list[str], limitations: list[str], inds: list[Indicator] | None = None,
-                  refs: dict[str, str] | None = None) -> dict:
+                  refs: dict[str, str] | None = None, policy=None, market_observations: dict | None = None) -> dict:
     """The only numbers the LLM may quote. Everything is pre-formatted text; the LLM does no arithmetic."""
     return {
         "benchmark": benchmark.model_dump(mode="json"),
@@ -191,6 +236,11 @@ def facts_for_llm(benchmark: BenchmarkSection, financial: FinancialSection, supp
         "supplier_exposure": [s.model_dump(mode="json") for s in suppliers],
         "severity_indicators": [i.model_dump(mode="json") for i in (inds or [])],
         "internal_refs": [{"ref": k, "description": v} for k, v in sorted((refs or {}).items())],
+        "policy_context": {"status": policy.status if policy else "unavailable", "method": policy.method if policy else "none",
+                           "note": policy.note if policy else "policy retrieval was not run",
+                           "passages": [{"policy_ref": p.policy_ref, "document": p.doc_title, "type": p.doc_type, "text": p.content}
+                                        for p in (policy.passages if policy else [])]},
+        "market_observations": market_observations or {"observed_price_direction": "unknown"},
         "warnings": warnings, "limitations": limitations,
     }
 

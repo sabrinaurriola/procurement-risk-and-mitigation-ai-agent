@@ -17,22 +17,25 @@ from typing import Any, Callable, TypedDict
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from src.agent import claims
 from src.agent.config import PROFILES, Limits
 from src.agent.credibility import STRONG_TIERS
 from src.agent.data import DataSource
 from src.agent.evidence import normalise_url, prefilter, to_evidence
 from src.agent.facts import (benchmark_section, facts_for_llm, facts_text, financial_section, horizon_months, indicators,
-                             internal_refs, monetary_values, supplier_exposure)
+                             internal_refs, monetary_values, policy_context, policy_map, supplier_exposure)
 from src.agent.llm import LLMClient, LLMError
 from src.agent.render import render_markdown
+from src.agent.summary import compose_summary
 from src.agent.schemas import (AssessmentRequest, AssessmentResponse, DraftReport, ErrorInfo, EvidenceItem,
                                EvidenceJudgements, Execution, RefinedQueries, Report)
 from src.agent.validation import ValidationContext, inject_required_risks, prune_unsupported, validate_draft
 from src.calculations.exposure import calculate_exposure
+from src.rag.retrieve import PolicyResult, PolicyRetriever, build_queries
 from src.tools.search import SearchTool
 
 LIMITATIONS = [
-    "Internal policy and supplier-assessment retrieval (RAG) is not part of this version.",
+    "Policy passages come from fictional internal documents; they are internal context only, not evidence of real regulatory compliance or of a supplier's current compliance.",
     "Existing suppliers, contracts and demand forecasts are synthetic (fictional Bakery Foods Inc.); no public-news monitoring "
     "of existing suppliers is performed.",
     "External evidence comes from web/news search and may be incomplete, outdated or biased; material claims need human verification.",
@@ -52,6 +55,7 @@ class Deps:
     llm: LLMClient
     tavily: SearchTool | None = None
     gdelt: SearchTool | None = None
+    policy: PolicyRetriever | None = None
     limits: Limits = field(default_factory=Limits)
     clock: Callable[[], float] = time.monotonic
     today: Callable[[], date] = date.today
@@ -72,6 +76,7 @@ class AgentState(TypedDict, total=False):
     suppliers: list
     indicators: list
     internal_refs: dict
+    policy: Any
     warnings: list[str]
     missing_data: list[str]
     partial_reasons: list[str]
@@ -188,6 +193,27 @@ def build_graph(deps: Deps):
                 "partial_reasons": list(state.get("partial_reasons", [])) + partial,
                 "trace": _trace(state, "calculate", status=calc.status, benchmark=bench.status,
                                 indicators={i.category: i.severity for i in inds})}
+
+    def retrieve_policy(state: AgentState) -> dict:
+        req = state["request"]
+        if deps.policy is None:
+            res = PolicyResult("unavailable", "none", [], "policy retrieval is not configured", 0)
+        else:
+            queries = build_queries(req["ingredient"], {i.category for i in state.get("indicators", [])})
+            try:
+                res = deps.policy.retrieve(queries, req["ingredient"], lim.policy_top_k)
+            except Exception as exc:  # noqa: BLE001 - never leak details; the limitation is surfaced instead
+                res = PolicyResult("unavailable", "none", [], f"policy retrieval failed ({type(exc).__name__})", 0)
+        warnings, partial = list(state.get("warnings", [])), list(state.get("partial_reasons", []))
+        if res.status == "unavailable":
+            msg = f"POLICY_CONTEXT_UNAVAILABLE: {res.note or 'no policy passage was retrieved'}; no policy guidance is given"
+            warnings.append(msg)
+            partial.append(msg)
+        elif res.status == "fallback":
+            warnings.append(f"POLICY_RETRIEVAL_FALLBACK: full-text search was used instead of vector search ({res.note})")
+        return {"policy": res, "warnings": warnings, "partial_reasons": partial,
+                "trace": _trace(state, "retrieve_policy", status=res.status, method=res.method, passages=len(res.passages),
+                                refs=[p.policy_ref for p in res.passages], note=res.note, embedding_calls=res.embedding_calls)}
 
     def _budget_left(state: AgentState, tool: str) -> int:
         cap = lim.max_tavily_calls if tool == "tavily" else lim.max_gdelt_calls
@@ -326,14 +352,18 @@ def build_graph(deps: Deps):
 
     def _facts(state: AgentState) -> dict:
         return facts_for_llm(state["benchmark"], state["financial"], state["suppliers"], state.get("warnings", []), LIMITATIONS,
-                             state.get("indicators", []), state.get("internal_refs", {}))
+                             state.get("indicators", []), state.get("internal_refs", {}), state.get("policy"),
+                             {"observed_price_direction": claims.observed_price_direction(state.get("evidence", [])),
+                              "basis": "direct trade-press/official items with price wording; the +10% benchmark shock is a hypothetical scenario, not an observation"})
 
     def draft(state: AgentState) -> dict:
         req = state["request"]
         profile = PROFILES[req["ingredient"]]
         ev = [{"evidence_id": e.evidence_id, "kind": e.kind, "source": e.source, "relevance": e.relevance,
                "source_tier": e.credibility, "domain": e.domain, "title": e.title, "snippet": e.snippet[:400], "url": e.url,
-               "published_date": str(e.published_date) if e.published_date else None}
+               "published_date": str(e.published_date) if e.published_date else None,
+               "price_direction": claims.price_direction(e.title, e.snippet),
+               "price_scope": "other-market price quotation" if claims.other_market_markers(e.snippet) else "none"}
               for e in state.get("evidence", []) if e.relevance in EVIDENCE_USABLE]
         try:
             raw = deps.llm.draft_report(profile.display_name, facts_text(_facts(state)), ev, state.get("problems", []), lim.max_candidates)
@@ -353,7 +383,7 @@ def build_graph(deps: Deps):
             parsed = None
         if parsed is not None:
             spot = PROFILES[state["request"]["ingredient"]].assumptions.spot_premium
-            ctx = ValidationContext(set(state.get("internal_refs", {})), list(state.get("indicators", [])))
+            ctx = ValidationContext(set(state.get("internal_refs", {})), list(state.get("indicators", [])), policy_map(state.get("policy")))
             # an internal exposure (coverage gap, non-approved supplier) is never silently omitted
             parsed, notes = inject_required_risks(parsed, ctx)
             args = (state.get("evidence", []), facts_text(_facts(state)), state["financial"].status == "available",
@@ -397,13 +427,14 @@ def build_graph(deps: Deps):
         return wrapper
 
     g = StateGraph(AgentState)
-    for name, fn in (("load_internal", load_internal), ("calculate", calculate), ("plan_research", plan_research),
+    for name, fn in (("load_internal", load_internal), ("calculate", calculate), ("retrieve_policy", retrieve_policy), ("plan_research", plan_research),
                      ("search", search), ("filter_evidence", filter_evidence), ("draft", draft), ("validate", validate),
                      ("finalize", finalize)):
         g.add_node(name, timed(fn))
     g.add_edge(START, "load_internal")
     g.add_conditional_edges("load_internal", route_after_load, {"calculate": "calculate", "finalize": "finalize"})
-    g.add_edge("calculate", "plan_research")
+    g.add_edge("calculate", "retrieve_policy")
+    g.add_edge("retrieve_policy", "plan_research")
     g.add_edge("plan_research", "search")
     g.add_conditional_edges("search", lambda st: "finalize" if st.get("error") else "filter_evidence",
                             {"filter_evidence": "filter_evidence", "finalize": "finalize"})
@@ -433,13 +464,15 @@ def _finalize(state: AgentState, deps: Deps) -> AssessmentResponse:
         error = {"code": "REPORT_VALIDATION_FAILED",
                  "message": "The drafted report failed validation after the allowed repair attempt: " + "; ".join(state["problems"][:5])}
     if error:
-        return AssessmentResponse(request_id=req["request_id"], status="failed", report_title=None, report_markdown=None,
+        return AssessmentResponse(request_id=req["request_id"], assessment_date=state["as_of"], status="failed", report_title=None, report_markdown=None,
                                   report=None, warnings=warnings, missing_data=list(state.get("missing_data", [])),
                                   limitations=[], error=ErrorInfo(**error), execution=execution)
     profile = PROFILES[req["ingredient"]]
     partial = list(state.get("partial_reasons", []))
     evidence: list[EvidenceItem] = state.get("evidence", [])
     status_map = _describe_sources(state, deps)
+    pol = state.get("policy")
+    status_map["policy"] = (f"{pol.status}: {pol.method}, {len(pol.passages)} passages" + (f" ({pol.note})" if pol.note else "")) if pol else "not_run"
     for name in ("tavily", "gdelt"):
         s = status_map.get(name, "not_used")
         if s.startswith(("unavailable", "partial", "not_configured")):
@@ -463,14 +496,18 @@ def _finalize(state: AgentState, deps: Deps) -> AssessmentResponse:
     rej = state.get("rejections", {})
     if rej:
         status_map["filtering"] = "excluded search results (kept out of the report): " + ", ".join(f"{k}={v}" for k, v in sorted(rej.items()))
+    summary = compose_summary(draft=state["draft"], indicators=list(state.get("indicators", [])), financial=state["financial"],
+                              suppliers=state["suppliers"], removed=removed, partial=partial,
+                              observed=claims.observed_price_direction(evidence), horizon_months=req["horizon_months"],
+                              policy_status=pol.status if pol else "unavailable")
     report = Report(request_id=req["request_id"], ingredient=req["ingredient"], horizon_months=req["horizon_months"],
                     assessment_date=state["as_of"], title=f"{profile.display_name} Procurement Risk Assessment",
-                    draft=state["draft"], indicators=list(state.get("indicators", [])), benchmark=state["benchmark"],
-                    financial=state["financial"], supplier_exposure=state["suppliers"], evidence=evidence,
+                    draft=state["draft"].model_copy(update={"executive_summary": summary}), indicators=list(state.get("indicators", [])), benchmark=state["benchmark"],
+                    financial=state["financial"], policy=policy_context(pol), supplier_exposure=state["suppliers"], evidence=evidence,
                     source_status=status_map, removed_claims=removed, warnings=warnings,
                     missing_data=list(state.get("missing_data", [])), limitations=list(LIMITATIONS), disclaimers=list(DISCLAIMERS))
     status = "partial" if partial else "completed"
-    return AssessmentResponse(request_id=req["request_id"], status=status, report_title=report.title,
+    return AssessmentResponse(request_id=req["request_id"], assessment_date=state["as_of"], status=status, report_title=report.title,
                               report_markdown=render_markdown(report, status), report=report, warnings=warnings,
                               missing_data=report.missing_data, limitations=report.limitations, error=None, execution=execution)
 
@@ -488,8 +525,12 @@ def run_assessment(request: dict | AssessmentRequest, deps: Deps) -> tuple[Asses
                                    execution=Execution(elapsed_seconds=0.0, research_rounds=0, tool_calls={}, llm_calls=0,
                                                        tokens={"input": 0, "output": 0}, mock=deps.mock)), [])
     now = deps.clock()
-    initial: AgentState = {"request": req.model_dump(), "as_of": deps.today(), "started_at": now,
-                           "deadline_at": now + deps.limits.deadline_seconds, "trace": [], "warnings": [], "missing_data": [],
+    today = deps.today()
+    as_of = req.assessment_date or today
+    initial: AgentState = {"request": req.model_dump(), "as_of": as_of, "started_at": now,
+                           "deadline_at": now + deps.limits.deadline_seconds, "trace": [],
+                           "warnings": [f"ASSESSMENT_DATE_OVERRIDE: assessed as of {as_of} (today is {today}); data freshness is judged against {as_of}"]
+                           if as_of != today else [], "missing_data": [],
                            "partial_reasons": [], "round": 0, "evidence": [], "calls": {}, "call_log": {}, "call_records": [],
                            "executed": [], "problems": [], "repairs": 0, "removed": [], "notes": [], "usable": {}}
     final = build_graph(deps).invoke(initial, config={"recursion_limit": 60})

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from src.agent.data import PostgresData
 from src.agent.graph import Deps, run_assessment
 from src.agent.llm import LLMError, OpenAILLM
-from src.agent.mock import DemoLLM, MockSearch
+from src.agent.mock import DemoLLM, MockSearch, build_mock_policy
 
 RUNS = Path(__file__).resolve().parents[2] / "runs"
 # USD per million tokens (input, output) from OpenAI's model page, checked 10 Nov 2026; verify before relying on it.
@@ -43,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-tokens", type=int, default=40_000, help="hard per-run token cap for the LLM")
     args = ap.parse_args(argv)
     load_dotenv()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")     # Windows consoles (cp1252) cannot print every report character
 
     if args.live:
         if os.getenv("ALLOW_PAID_CALLS") != "1":
@@ -55,11 +57,18 @@ def main(argv: list[str] | None = None) -> int:
         except LLMError as exc:
             print(f"REFUSED: {exc.code}")
             return 3
-        deps = Deps(PostgresData(), llm, TavilyTool(os.getenv("TAVILY_API_KEY")), GdeltTool(), require_research=True)
+        from src.rag.embed import EmbeddingError, OpenAIEmbedder
+        from src.rag.retrieve import PostgresPolicyRetriever
+        try:
+            embedder = OpenAIEmbedder(allow_paid=True, request_id=args.request_id)
+        except EmbeddingError:
+            embedder = None                     # policy retrieval then uses the full-text fallback
+        deps = Deps(PostgresData(), llm, TavilyTool(os.getenv("TAVILY_API_KEY")), GdeltTool(max_attempts=2),          # at most ONE retry (authorised limit)
+                    policy=PostgresPolicyRetriever(embedder), require_research=True)
     else:
         from datetime import date
         today = date.today()
-        deps = Deps(PostgresData(), DemoLLM(), MockSearch("tavily", today), MockSearch("gdelt", today), mock=True)
+        deps = Deps(PostgresData(), DemoLLM(), MockSearch("tavily", today), MockSearch("gdelt", today), policy=build_mock_policy(), mock=True)
 
     response, trace = run_assessment({"request_id": args.request_id, "ingredient": args.ingredient,
                                       "horizon_months": args.horizon}, deps)

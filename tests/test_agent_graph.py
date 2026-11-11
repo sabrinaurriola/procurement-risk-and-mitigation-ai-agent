@@ -46,7 +46,7 @@ def test_t01_complete_assessment_has_sourced_evidence_exact_calculations_and_cle
         for c in x.citations:
             e = by_id[c.evidence_id]
             assert e.relevance in ("direct", "contextual") and e.published_date and e.credibility != "social"
-    assert [n["node"] for n in trace][:3] == ["load_internal", "calculate", "plan_research"] and trace[-1]["node"] == "validate"
+    assert [n["node"] for n in trace][:4] == ["load_internal", "calculate", "retrieve_policy", "plan_research"] and trace[-1]["node"] == "validate"
     assert all(c.status == "unverified" for c in r.draft.supplier_candidates) and len(r.draft.supplier_candidates) <= 3
 
 
@@ -230,7 +230,7 @@ def test_unsupported_claims_that_survive_the_repair_are_removed_visibly_not_kept
     assert resp.status == "partial" and llm.draft_calls == 2
     assert "R9" not in [x.risk_id for x in r.draft.risks] and len(r.removed_claims) == 1 and "Fertiliser rail closures" in r.removed_claims[0]
     assert any(w.startswith("UNSUPPORTED_CLAIMS_REMOVED") for w in resp.warnings)
-    assert "Claims removed because their support could not be verified" in resp.report_markdown
+    assert "Unverified concerns - drafted claims removed" in resp.report_markdown
 
 
 def test_candidate_with_unsupported_country_or_status_is_never_published():
@@ -324,7 +324,7 @@ def test_a_failed_source_is_not_called_again_in_later_rounds():
 # ── structure / safety ──
 def test_graph_has_no_purchasing_approval_contract_or_supplier_monitoring_nodes():
     nodes = set(build_graph(deps()).get_graph().nodes) - {"__start__", "__end__"}
-    assert nodes == {"load_internal", "calculate", "plan_research", "search", "filter_evidence", "draft", "validate", "finalize"}
+    assert nodes == {"load_internal", "calculate", "retrieve_policy", "plan_research", "search", "filter_evidence", "draft", "validate", "finalize"}
 
 
 def test_evidence_is_passed_to_the_llm_as_data_with_only_the_needed_fields():
