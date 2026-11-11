@@ -456,6 +456,9 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
         draft, n = inject_required_risks(draft, ctx)
         notes += [x for x in n if x not in notes]
         problems = validate_draft(draft, evidence, facts_text, financial_available, max_candidates, money_allowed, ctx)
+        # The LLM's executive_summary is discarded: _finalize replaces it with a summary assembled by code from the retained findings.
+        # Wording problems in it cannot be fixed by removing an item and must not fail the run (live demo-001); a missing/too-short summary still blocks.
+        problems = [p for p in problems if not (p.startswith("executive_summary:") and "missing or too short" not in p)]
         if not problems:
             return draft, removed, notes, []
         drop: dict[str, set[int]] = {}

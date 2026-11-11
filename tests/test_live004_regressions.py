@@ -243,3 +243,13 @@ def test_prompt_documents_the_lead_rule_and_the_replaced_summary():
     from src.agent import prompts
     for needle in ("supplier_discovery", "POL-003", "logistics", "replaced"):
         assert needle in prompts.DRAFT_SYSTEM, needle
+
+
+def test_bad_llm_summary_wording_never_fails_the_run_after_repair():
+    """live demo-001: a hypothetical-shock wording problem in the LLM summary (discarded by the code-built summary) must not turn into REPORT_VALIDATION_FAILED."""
+    from tests.agent_fixtures import ScriptedLLM
+    bad = lambda d: d.model_copy(update={"executive_summary": "A +10% benchmark shock is expected to add EUR 107,744.17 to modelled cost over the horizon."})  # noqa: E731
+    llm = ScriptedLLM(drafts=[bad, bad])
+    resp, _ = run_assessment(REQUEST, deps(llm=llm))
+    assert resp.status != "failed", resp.error
+    assert "expected to add" not in resp.report.draft.executive_summary
