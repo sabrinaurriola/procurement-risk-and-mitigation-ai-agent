@@ -6,6 +6,27 @@ imported or tested n8n export\
 **Role of n8n:** Request intake, agent invocation, delivery, and failure
 notification only.
 
+## 0. Day 4 revision (11 Nov 2026) — SUPERSEDES §1–§7 WHERE THEY DIFFER
+
+**Status of everything in this document: PLANNED. No n8n workflow exists, was imported, or was tested.** The FastAPI side it calls is implemented in mock mode and verified (`docs/api-specification.md`, `docs/day4-architecture.md` §15). Design record: `docs/day4-architecture.md`.
+
+**Scope change:** n8n now also archives to **Notion** (`Assessment Reports`) and notifies through **Gmail**. It still performs no analysis, no LLM call and **no database access**; Supabase operational events are written by FastAPI only (n8n reports archive/delivery outcomes to FastAPI).
+
+**Revised flow**
+1. **Form Trigger** (ingredient, horizon, optional `request_id` for redelivery, optional `assessment_date`; **no** `requested_by`, no recipient, no `mode`) → **Set** (`request_id` if absent; `mode` from a workflow constant, default `mock`) → **IF valid**.
+2. **`request_id` supplied?** yes → skip POST, go to GET (redelivery; a `404` stops with a message and **never** falls back to POST). No → **`POST /assessments`** (timeout 180 s, Retry On Fail **off**).
+3. POST outcome: `200` → continue; `504 ASSESSMENT_TIMEOUT`, `409 ASSESSMENT_IN_PROGRESS` or a transport timeout → **bounded polling**: Wait 10 s → `GET /assessments/{id}`; `202` continue, `200` proceed; at most 24 polls (about 4 min) and 3 consecutive failed GETs; exhausted while running → operator e-mail, workflow ends. `404` after a transport error → operator alert (the POST may never have registered; **no automatic re-POST**). `401/403/422/429/501` → notify/alert immediately, no polling.
+4. **Switch on `assessment_status`:** `completed` / `partial` → Notion archive then Gmail; `failed` → **no Notion row**, operator Gmail notice (`error.code` and the fixed message only); unexpected value → error branch.
+5. **Notion archive (completed/partial):** `GET …/notion-blocks` → query by `Request ID` → create page without body (`Archive status = incomplete`) or reuse it → count existing children and append only the missing blocks in batches ≤ 100 → verify count and SHA-256 → `Archive status = stored` → relay `archive.stored|failed` to `POST …/events`. **The full report is an MVP acceptance criterion; never truncated** (full algorithm: `docs/day4-architecture.md` §9).
+6. **Gmail:** one fixed recipient; **draft first, send only after approval**; Notion link in the body; if the archive failed, attach `report.md` and show an "archive incomplete" banner. Check Notion `Delivery status` before sending; set `sent` right after; relay `delivery.sent|failed`.
+7. **Error Trigger** workflow → operator e-mail with execution id.
+
+**Hard rules:** after the first successful POST every branch uses **GET only**; Notion or Gmail failures never start an assessment; the FastAPI record is authoritative.
+
+**Pending integration verification (assumptions, not facts):** that the Form Trigger can acknowledge immediately ("form submitted") while the execution continues and holds the POST; Notion's block/length/rate limits and children-count behaviour; Gmail OAuth refresh-token lifetime in testing mode. Fallbacks for the first: respond on completion with a short confirmation page, or Webhook + Respond to Webhook.
+
+**Added tests (planned):** N07 poll after `504` → one execution, result delivered · N08 poll exhausted → operator e-mail, no POST · N09 interrupted Notion upload → resume without duplicate page or blocks · N10 redelivery with an existing `request_id` → GET only, no second e-mail · N11 `failed` assessment → no Notion row, operator notice · N12 assertion on the API call log: **no second `POST /assessments` in any scenario**.
+
 ## 1. Design decision
 
 **LangGraph (Python) is the primary agent.** n8n is a thin integration
@@ -48,7 +69,7 @@ the Webhook path.
   2                 **Edit Fields     Normalize request    Create `request_id`,
                     (Set)**           fields               `ingredient`,
                                                            `horizon_months`,
-                                                           `requested_by` if available
+                                                           (`requested_by` dropped in Day 4)
 
   3                 **IF**            Reject invalid input Allow only supported
                                                            ingredients; require horizon

@@ -5,13 +5,15 @@ Portfolio MVP for the fictional **Bakery Foods Inc.** (industrial bakery manufac
 Exposure is calculated from synthetic contracts, forecasts, market benchmarks and explicit scenario assumptions — **never from company revenue**. Scenario-level procurement exposure is not company-wide financial impact. Do not invent facts to match the company profile.
 
 ## Architecture boundaries
-- **LangGraph + Python** is the only agent orchestrator (research, SQL/RAG, calculations, report). n8n only does intake → HTTP call to the Python API → status routing → email. No analysis or LLM logic in n8n.
+- **LangGraph + Python** is the only agent orchestrator (research, SQL/RAG, calculations, report). n8n only does intake → HTTP call to the Python API → status routing → Notion archive and Gmail notification (Day 4 design, see `docs/day4-architecture.md`). No analysis, LLM logic or database access in n8n; n8n never starts a second assessment (after the first POST it uses GET only).
 - Core infrastructure: Supabase PostgreSQL (+ pgvector), OpenAI (LLM + embeddings). Research APIs: **Tavily and GDELT only**. EC Excel files are market-data sources ingested into Postgres.
 - Deferred until the core MVP works: FRED, MCP, LLM-as-a-Judge. Do not build them unasked.
 - Supplier scope: existing suppliers/contracts are **fictional**; never replace them with real companies, attribute real news to them, or put real names into synthetic contracts. Real alternative-supplier **discovery** is in scope as UNVERIFIED leads only (attributes must be quoted from a source, else `unknown`). Public-risk monitoring of existing suppliers is a future enhancement: do not implement it.
 - Findings declare `basis` (internal_model / external_evidence / combined); citations need a verbatim quote; internal findings cite internal records only; unsupported claims are removed visibly, never decorated with unrelated citations.
 - Keep three data classes separate and labelled: external market data, synthetic company data (`is_synthetic`), scenario assumptions.
 - Agent DB access: parameterised queries only, read-only session. The LLM never writes SQL.
+- FastAPI (`src/api/`) is the authority for assessment records (file store, atomic) and the **single writer of operational events**. That writer is the one narrow exception to "no database writes" outside the approved pipelines: it uses its own INSERT-only role/credential (`OPS_DATABASE_URL`) on `ops.operational_events` only, never touches `procurement`, never stores report text, evidence, prompts, addresses or exception text, and its failure never changes an assessment. **Planned: not built and migration `002` not applied until gate G-OPS in `docs/day4-architecture.md` §8 passes.**
+- Status layers stay separate: `run_state`, `assessment_status` (completed/partial/failed), `archive_status`, `delivery_status`. A `failed` assessment is never archived in the normal Notion report database.
 
 ## Environment
 - Python **3.13** venv: `C:\Users\sabri\venvs\procurement-agent` (outside OneDrive). Run `C:\Users\sabri\venvs\procurement-agent\Scripts\python.exe`; not the system Python 3.14.
@@ -51,6 +53,7 @@ Exposure is calculated from synthetic contracts, forecasts, market benchmarks an
 - **Proceed without asking (after plan approval):** local edits within the approved design, `pytest`, dry-run pipelines, read-only DB queries.
 - **Ask explicitly first:** applying migrations or any DDL/DML (`--apply`), enabling pgvector, destructive operations (drop/truncate/delete, hard reset, force push, deleting files), new integrations or dependencies outside the plan, **any paid or quota-consuming API call** (OpenAI, Tavily, embeddings), sending email/notifications, committing or pushing.
 - Show the SQL and its expected database effect before any migration.
+- Also ask first (Day 4): creating database roles or the `ops` schema, installing n8n/Node tooling, connecting Notion or Gmail credentials, creating Notion pages, creating Gmail drafts or sending any e-mail, and wiring or running live mode through the API.
 - OpenAI budget: max **$5** total; log usage in `runs/usage.jsonl`; live runs need `--live` and prior approval.
 
 ## Honesty about status

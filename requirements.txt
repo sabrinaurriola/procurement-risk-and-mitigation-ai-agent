@@ -7,3 +7,5 @@ langgraph==1.2.20
 openai==3.49.0
 httpx==0.28.1
 tenacity==9.2.1
+fastapi==0.162.4
+uvicorn==0.54.0

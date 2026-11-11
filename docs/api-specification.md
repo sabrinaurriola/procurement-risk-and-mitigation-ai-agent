@@ -1,114 +1,134 @@
 # Assessment API — Contract between n8n and the LangGraph service (Day 4 implementation specification)
 
-**Status:** specification only. The request/response models already exist in code (`src/agent/schemas.py`, including `assessment_date`); the FastAPI service, the request store and the n8n workflow are **not built** (Day 4). New dependencies (`fastapi`, `uvicorn`) need approval before installation.
+**Status (11 Nov 2026):** the FastAPI service is **implemented in mock mode (S1) and verified** (tests and a real-process run recorded in `docs/day4-architecture.md` §15): `GET /health`, `POST /assessments`, `GET /assessments/{request_id}`, `GET /assessments/{request_id}/report.md`, authentication, validation, idempotency, single-flight, atomic persistence, restart handling, deadline/recovery and safe errors. **Planned, not built:** `GET …/notion-blocks`, `POST …/events` (n8n outcome relay), the database event writer, live mode (currently refused), the n8n workflow. Design record and decisions: `docs/day4-architecture.md`. Dependencies `fastapi`, `uvicorn` are installed and pinned in `requirements.txt`.
 
 ## 1. Responsibilities
-| Python service (LangGraph) owns | n8n owns |
+| Python service (LangGraph + FastAPI) owns | n8n owns |
 |---|---|
-| Request validation (authoritative), ingredient and date rules | Intake (form/webhook), generating a unique `request_id`, a first-line check for friendly errors |
-| All data access, research, calculations, RAG, LLM calls, evidence rules, report validation | **No analysis, no LLM, no research, no calculations** |
-| Status decision (`completed` / `partial` / `failed`), warnings, missing data, limitations | Routing on `status`; email/notification text; operator alert via a separate Error Trigger workflow |
-| Retries of research tools and LLM calls (one owner per operation) | **No automatic re-POST of an assessment.** Delivery (email) retries only; a delivery failure never re-runs research |
-| Idempotent result storage, duplicate protection, timeouts, logging with `request_id` | Waiting for the response; one recovery `GET` after a timeout |
+| Request validation (authoritative), ingredient and date rules, authentication | Intake (Form Trigger), generating a unique `request_id`, a first-line check for friendly errors |
+| All data access, research, calculations, RAG, LLM calls, evidence rules, report validation | **No analysis, no LLM, no research, no calculations, no database access** |
+| Status decision (`completed` / `partial` / `failed`), warnings, missing data, limitations | Routing on `assessment_status`; Notion archive; e-mail text; operator alert via a separate Error Trigger workflow |
+| Retries of research tools and LLM calls (one owner per operation) | **No automatic re-POST of an assessment, in any branch.** Archive/delivery retries use GET only; a delivery failure never re-runs research |
+| Idempotent, atomic, **authoritative** result storage; duplicate protection; deadline; operational events; logging with `request_id` | Waiting for the response; bounded GET polling after an uncertain POST |
 
-## 2. Endpoints (local, bound to 127.0.0.1; header `X-API-Key` from an environment variable)
-| Method and path | Purpose |
-|---|---|
-| `GET /health` | `{"status":"ok","version":…,"live_enabled":bool,"db":"ok"\|"error"}`. Database check is a read-only `SELECT 1`; never returns connection details. |
-| `POST /assessments` | Run (or replay) one assessment. **Synchronous**; returns the envelope in §4. |
-| `GET /assessments/{request_id}` | Stored envelope (idempotent recovery after an n8n timeout). `404` unknown, `202` still running. |
-| `GET /assessments/{request_id}/report.md` | The report as `text/markdown` (for e-mail attachment). |
-
-Synchronous is justified by measurement: live runs took 54–68 s, ~45 s of it GDELT retries (§7). If a measured p95 exceeds 120 s on Day 4, switch `POST` to `202 {"status":"running"}` plus polling `GET`; the envelope does not change.
+## 2. Endpoints (local, bound to 127.0.0.1; header `X-API-Key`, value from `ASSESSMENT_API_KEY`; the app refuses to start without it)
+| Method and path | Purpose | Status |
+|---|---|---|
+| `GET /health` | `{"status":"ok","version":…,"live_enabled":bool,"db":"ok"\|"error"}` — no key required; read-only `SELECT 1`; never returns connection details | Implemented, verified |
+| `POST /assessments` | Run (or replay) one assessment. **Synchronous wait** up to the deadline; envelope in §4 | Implemented, verified |
+| `GET /assessments/{request_id}` | `200` stored envelope · `202` still running · `404` unknown | Implemented, verified |
+| `GET /assessments/{request_id}/report.md` | The report as `text/markdown`; `404 REPORT_NOT_AVAILABLE` for a failed run; `202`/`404` as above | Implemented, verified |
+| `GET /assessments/{request_id}/notion-blocks` | Deterministic flat block rendering for the Notion archive (`report_sha256`, `total_blocks`, `blocks[]`) | **Planned (S3)** |
+| `POST /assessments/{request_id}/events` | n8n reports `archive.*` / `delivery.*` outcomes; allow-listed; `404` if the id is unknown | **Planned (S3)** |
+OpenAPI/docs endpoints are disabled. Run with **one** worker: the single-flight registry is in memory.
 
 ## 3. Request — `POST /assessments`
 ```json
 { "request_id": "demo-001", "ingredient": "sunflower_oil", "horizon_months": 3,
-  "assessment_date": "2026-11-20", "mode": "live" }
+  "assessment_date": "2026-11-20", "mode": "mock" }
 ```
 | Field | Rule |
 |---|---|
-| `request_id` | Required. `^[A-Za-z0-9_-]{1,64}$`. **Idempotency key.** |
-| `ingredient` | Required. Currently only `sunflower_oil` (wheat is not implemented; anything else → `INVALID_REQUEST`). |
+| `request_id` | Required. `^[A-Za-z0-9_-]{1,64}$`. **Idempotency key** (also the file name, hence the strict pattern). |
+| `ingredient` | Required. Currently only `sunflower_oil` (anything else → `422 INVALID_REQUEST`). |
 | `horizon_months` | Required, integer 1–6. Months are the full calendar months after the assessment month. |
-| `assessment_date` | Optional ISO date, default today. Allowed from 365 days before to 90 days after today. Overriding is for reproducible demos; it is echoed in the response and adds the warning `ASSESSMENT_DATE_OVERRIDE`. Data freshness is judged against this date. |
-| `mode` | Optional, `live` (default) or `mock`. `mock` uses sanitised fixtures and is labelled `MOCK RUN` everywhere. `live` makes paid calls and requires the server flag `ALLOW_PAID_CALLS=1`; otherwise `FAILED` with `LIVE_NOT_AUTHORISED` and **no** external call. |
+| `assessment_date` | Optional ISO date, default today. Allowed from 365 days before to 90 days after today. Adds the warning `ASSESSMENT_DATE_OVERRIDE`. Data freshness is judged against this date. |
+| `mode` | Optional, **`live` is the default**, or `mock`. `mock` uses fixtures and is labelled `MOCK RUN` everywhere (real read-only database data, fixture research and drafting). `live` needs the server flag `ALLOW_PAID_CALLS=1`; otherwise `403 LIVE_NOT_AUTHORISED` and no external call, and an omitted `mode` is therefore refused on a default server. **In this build live is not wired even with the flag: `501 LIVE_NOT_AVAILABLE`.** |
 | unknown fields | Rejected (`extra="forbid"`). |
 
-## 4. Response envelope (always the same shape)
+## 4. Response envelope
+A finished request always returns this shape (HTTP 200 unless stated; **n8n branches on `assessment_status`, not on the HTTP code**):
 ```json
 { "schema_version": "1.1", "request_id": "demo-001", "assessment_date": "2026-11-20",
-  "status": "partial", "idempotent_replay": false,
+  "run_state": "finished", "assessment_status": "partial", "status": "partial", "idempotent_replay": false,
   "report_title": "Sunflower oil Procurement Risk Assessment",
   "report_markdown": "…", "report": { "…structured report…" },
   "report_location": {"markdown": "/assessments/demo-001/report.md", "json": "/assessments/demo-001"},
-  "warnings": ["…"], "missing_data": ["…"], "limitations": ["…"],
-  "error": null,
+  "warnings": ["…"], "missing_data": ["…"], "limitations": ["…"], "error": null,
   "execution": {"elapsed_seconds": 63.2, "research_rounds": 1, "tool_calls": {"tavily": 3, "gdelt": 1},
                 "llm_calls": 2, "tokens": {"input": 5873, "output": 1970}, "mock": false} }
 ```
-`error` is `null` unless `status` is `failed`: `{"code": "...", "message": "..."}` (sanitised: no credentials, hosts or raw exception text). **n8n must branch on `status`, not on the HTTP code.** `idempotent_replay`, `report_location` and `schema_version` are added by the API layer; everything else is the existing `AssessmentResponse`.
+* `run_state` describes the **execution** (`running` / `finished`); `assessment_status` describes the **result** (`completed` / `partial` / `failed`). `status` is kept for the existing contract and always equals `assessment_status`. The additive fields (`run_state`, `assessment_status`, `idempotent_replay`, `report_location`) come from the API layer; `schema_version` stays `1.1`.
+* **Still running** (`GET`, HTTP 202): `{"request_id","run_state":"running","assessment_status":null,"started_at","overdue":bool}` + `Retry-After`. There is no `status` and no report.
+* **Errors that are not an assessment result** (401, 403, 404, 409, 422, 429, 501, 504, store/internal errors without a record): `{"request_id","run_state":null|"running","assessment_status":null,"error":{"code","message"}}` with fixed messages — no paths, hosts, credentials or exception text. `422` adds `error.problems[{field,message}]`.
+* `error` is `null` unless the assessment `failed`.
 
 ## 5. Status definitions (exact)
 | Status | Meaning | Rule |
 |---|---|---|
 | **`completed`** | A validated, usable report **with every required component present**. | Valid report **and** none of the PARTIAL conditions below. |
-| **`partial`** | A validated report is delivered, but at least one required component is missing or degraded; its limits are shown prominently. Deliver it with the warnings. | Any of: `FINANCIAL_UNAVAILABLE` (missing contract price/forecast month or benchmark) · benchmark `stale` or `unavailable` · `RESEARCH_SOURCE_TAVILY` / `RESEARCH_SOURCE_GDELT` unavailable, partially failed or not configured · `NO_RELEVANT_EVIDENCE` · `NO_STRONG_EXTERNAL_EVIDENCE` · `UNSUPPORTED_CLAIMS_REMOVED` · `POLICY_CONTEXT_UNAVAILABLE`. |
+| **`partial`** | A validated report is delivered, but at least one required component is missing or degraded; its limits are shown prominently. | Any of: `FINANCIAL_UNAVAILABLE` · benchmark `stale` or `unavailable` · `RESEARCH_SOURCE_TAVILY` / `RESEARCH_SOURCE_GDELT` unavailable, partially failed or not configured · `NO_RELEVANT_EVIDENCE` · `NO_STRONG_EXTERNAL_EVIDENCE` · `UNSUPPORTED_CLAIMS_REMOVED` · `POLICY_CONTEXT_UNAVAILABLE`. |
 | **`failed`** | **No report.** Nothing is presented as an assessment. | Error code in §6. |
+
+**Approved, NOT implemented (D7):** GDELT becomes an optional source. Its failure stays visible (warning, event, Notion, e-mail) but is not by itself PARTIAL while Tavily is OK and neither `NO_RELEVANT_EVIDENCE` nor `NO_STRONG_EXTERNAL_EVIDENCE` applies. Claim removals, Tavily failure, a stale/unavailable benchmark and unavailable financials still ⇒ PARTIAL. **Until the S6 report-quality slice implements and tests this, the table above is the behaviour.**
 
 Not partial by themselves (warning only): `OVER_COMMITMENT`, `POLICY_RETRIEVAL_FALLBACK`, `RULE_BASED_RISK_ADDED`, `ASSESSMENT_DATE_OVERRIDE`, `MOCK RUN`, a research source answering HTTP 200 with no articles while another source supplied strong evidence. Warnings are never dropped from the envelope.
 
 ## 6. Errors
 | Code | HTTP | Cause | n8n action |
 |---|---|---|---|
-| `INVALID_REQUEST` | 422 | Validation failed | Notify requester; fix input; new `request_id` |
-| `REQUEST_ID_CONFLICT` | 409 | Same `request_id`, different parameters | Generate a new `request_id` |
-| `ASSESSMENT_IN_PROGRESS` | 409 + `Retry-After` | Same `request_id` already running | Wait, then `GET` |
-| `BUSY` | 429 + `Retry-After` | Another assessment is running (limit: 1 concurrent) | Wait; do not queue in n8n |
-| `LIVE_NOT_AUTHORISED` | 403 | `mode=live` but the server flag is off | Operator alert |
+| `UNAUTHORIZED` | 401 | Missing/wrong `X-API-Key` | Operator alert |
+| `INVALID_REQUEST` | 422 | Validation failed (no record is created) | Notify requester; fix input |
+| `REQUEST_ID_CONFLICT` | 409 | Same `request_id`, different parameters (stored or running) | New `request_id` |
+| `ASSESSMENT_IN_PROGRESS` | 409 + `Retry-After` | Same id and parameters already running | **Poll with GET; never POST again** |
+| `BUSY` | 429 + `Retry-After` | Another assessment is running (limit: 1 concurrent); the refused request leaves no record | Wait; do not queue in n8n |
+| `LIVE_NOT_AUTHORISED` | 403 | `mode=live` but the server flag is off; no record, no external call | Operator alert |
+| `LIVE_NOT_AVAILABLE` | 501 | `mode=live` but live is not wired in this build | Operator alert |
+| `ASSESSMENT_TIMEOUT` | 504 + `Retry-After` | The HTTP deadline was reached **while the run continues**. This is *not* a failure and writes no failed record | **Bounded GET polling** (`docs/day4-architecture.md` §7); never POST again |
+| `NOT_FOUND` | 404 | Unknown `request_id` | Stop; after a transport error alert the operator (the POST may not have registered) |
+| `REPORT_NOT_AVAILABLE` | 404 | The assessment produced no report | — |
 | `INTERNAL_DATA_UNAVAILABLE` | 200 (`failed`) | Database unreachable | Operator alert |
-| `RESEARCH_UNAVAILABLE` | 200 (`failed`) | Neither research API answered (live gate, stops before any LLM spend) | Operator alert |
+| `RESEARCH_UNAVAILABLE` | 200 (`failed`) | Neither research API answered (stops before any LLM spend) | Operator alert |
 | `LLM_UNAVAILABLE` | 200 (`failed`) | Model call failed after SDK retries | Operator alert |
 | `REPORT_VALIDATION_FAILED` | 200 (`failed`) | Draft invalid after the one repair and not fixable by removal | Operator alert |
-| `ASSESSMENT_TIMEOUT` | 504 (`failed`) | Hard request deadline reached | One `GET` recovery, then alert |
-| `INTERNAL_ERROR` | 500 (`failed`) | Unexpected exception (sanitised) | Operator alert |
+| `ASSESSMENT_INTERRUPTED` | 200 (`failed`, stored) | The service restarted while the run was in progress; its worker is known to be dead. Never re-run automatically | Operator alert; new `request_id` |
+| `INTERNAL_ERROR` | 500 (first run, with the failed envelope) / 200 (replay) | Unexpected exception inside the run (sanitised) or a corrupt record | Operator alert |
 
 ## 7. Timeouts and latency budget
 | Layer | Limit | Note |
 |---|---|---|
-| Research loop (graph) | 100 s wall clock (config `deadline_seconds`; currently 180 s, lower on Day 4) | Stops starting new calls; discloses `RESEARCH_DEADLINE` |
-| Tavily / GDELT per attempt | 30 s, ≤ 3 attempts | Measured: GDELT answered **HTTP 429 twice (~12 s each) then HTTP 200 `{}`**, ≈ 45 s. **Decision (Day 4):** cap GDELT at 1 retry / ~20 s total, or run it last |
+| Research loop (graph) | 100 s wall clock (config `deadline_seconds`; currently 180 s, lower in a later slice) | Stops starting new calls; discloses `RESEARCH_DEADLINE` |
+| Tavily / GDELT per attempt | 30 s; GDELT at most 2 attempts in live runs | Measured: GDELT HTTP 429 twice then 200 `{}`, and HTTP 429 twice in demo-001/002 |
 | LLM per call | 60 s, SDK retries ≤ 2 | Token cap 40,000 per run |
-| **Hard request deadline** (server) | **150 s** | → `ASSESSMENT_TIMEOUT`; result stored if it later finishes |
-| **n8n HTTP Request node** | **180 s, Retry On Fail = OFF** | Longer than the server deadline so the server answers first |
+| **HTTP wait (server)** | **150 s**, env `ASSESSMENT_DEADLINE_SECONDS` | Hit ⇒ `504 ASSESSMENT_TIMEOUT` ("still running"); the worker is **never** cancelled |
+| Overdue marker | 600 s of running | `GET` shows `overdue:true`; the run is reported, not killed |
+| **n8n HTTP Request node (POST)** | **180 s, Retry On Fail = OFF** | Longer than the server wait so the server answers first |
+| n8n polling after an uncertain POST | Wait 10 s, up to 24 GETs (about 4 min); max 3 consecutive failed GETs | Then an operator e-mail; the workflow execution timeout is ≥ 15 min. **Design, not built** |
+Measured live latency: 100.4 s (demo-001), 72.2 s (demo-002); mock runs about 1–2 s.
 
-## 8. Idempotency and duplicate protection
-- **Key:** `request_id`. Stored result: `runs/assessments/{request_id}.json` (file store; **no database writes**, the agent's session is read-only). `request_hash` = SHA-256 of `ingredient`, `horizon_months`, `assessment_date`, `mode`.
-- **Same id, same hash, finished:** return the stored envelope with `idempotent_replay: true`; **no new research, no new spend.** (A stored `failed` is replayed too: a deliberate retry uses a new `request_id`.)
-- **Same id, different hash:** `409 REQUEST_ID_CONFLICT`.
-- **Same id while running:** `409 ASSESSMENT_IN_PROGRESS` (lock file `{request_id}.lock`, removed on completion; stale locks older than the hard deadline are ignored and logged).
-- **Concurrency:** one assessment at a time (`BUSY`); protects the paid-call budget and GDELT's one-request-per-5-seconds limit.
-- **Timeout recovery:** n8n never re-POSTs; it calls `GET /assessments/{request_id}` once, so a slow run cannot be duplicated.
+## 8. Idempotency, concurrency and persistence (implemented, verified)
+- **Key:** `request_id`; `request_hash` = SHA-256 of `ingredient`, `horizon_months`, `assessment_date` (as sent) and `mode`.
+- **Records (authoritative; archive/delivery outcomes never change them):** `runs/assessments/{request_id}.json` = `{request_hash, finished_at, envelope, trace}` (the trace is stored but never served), written **atomically** (temp file + fsync + `os.replace`) before the worker is released; `{request_id}.run.json` = running marker, removed when the record is written.
+- **Same id, same hash, finished:** the stored envelope with `idempotent_replay: true`; **no new research, no new spend**, also after a restart. A stored `failed` is replayed too (a deliberate retry uses a new `request_id`).
+- **Same id, different hash:** `409 REQUEST_ID_CONFLICT` (stored or running).
+- **Same id while running:** `409 ASSESSMENT_IN_PROGRESS` (+`Retry-After`).
+- **Single-flight:** one assessment at a time (`429 BUSY`), protecting the paid-call budget and GDELT's rate limit. Replays are not blocked by a running assessment.
+- **Execution is decoupled from the HTTP connection:** a server-owned worker thread runs the assessment; a client that disconnects or times out neither cancels nor duplicates it.
+- **Restart:** a running marker with no live worker in this process ⇒ the request becomes a stored `failed` / `ASSESSMENT_INTERRUPTED` (decided only when the worker is known to be dead). No automatic re-run.
+- **If the record file cannot be written** the result is served from memory until restart (logged); a restart then reports the request as interrupted.
 
-## 9. Logging and privacy
-Every log line and the per-request trace (`runs/{request_id}.json`) carry `request_id`; token usage goes to `runs/usage.jsonl`. No keys, `DATABASE_URL`, hosts, prompts or third-party contact details are logged. n8n stores the envelope in its execution log, so reports contain synthetic data and public sources only.
+## 9. Logging, events and privacy
+Every log line carries `request_id`; token usage goes to `runs/usage.jsonl`. No keys, `DATABASE_URL`, hosts, prompts, file paths or third-party contact details are logged or returned; exceptions are logged by class only.
+**Operational events** (taxonomy, metric sources and the planned `ops.operational_events` table: `docs/day4-architecture.md` §8): the API derives events from the finished envelope and hands them to an `EventSink`. S1 has only `NullEventSink` and an in-memory test sink; **no database writer exists and migration `002` is not applied.** When it exists it is the **single, narrow exception to "no database writes" in this service**, uses its own INSERT-only credential (`OPS_DATABASE_URL`), and a failure never changes an assessment. Events never contain report text, evidence, prompts, addresses or exception text.
 
 ## 10. Day 4 deliverables and tests
-Files: `src/api/app.py` (FastAPI), `src/api/store.py` (idempotent store + lock), `tests/test_api.py` (FastAPI `TestClient`, mock mode), `n8n/*.json` (sanitised exports).
-| ID | Contract test |
-|---|---|
-| A01 | Valid mock request → 200, envelope fields present, `status` in `{completed, partial, failed}` |
-| A02 | Replay same request → identical envelope, `idempotent_replay: true`, zero tool/LLM calls |
-| A03 | Same id, different parameters → 409; duplicate while running → 409; second concurrent request → 429 |
-| A04 | Invalid ingredient/horizon/date/extra field → 422 `INVALID_REQUEST` |
-| A05 | `mode=live` without the server flag → 403 and no external call |
-| A06 | Hard deadline → 504 `ASSESSMENT_TIMEOUT`; later `GET` returns the stored result |
-| A07 | Every `failed` response has no report and a sanitised error |
-| A08 | `GET /health` never leaks connection details |
-| N01–N06 | n8n tests from `docs/n8n-workflow-blueprint.md`, mapped to the statuses above |
+Files: `src/api/{app,models,store,events,runners,service}.py`, `tests/{api_fixtures,test_api,test_api_concurrency,test_api_events}.py` (implemented); `n8n/*.json` (planned, sanitised exports).
+| ID | Contract test | Status |
+|---|---|---|
+| A01 | Valid mock request → 200, envelope fields, `run_state`/`assessment_status` | Implemented, passing |
+| A02 | Replay → identical envelope, `idempotent_replay: true`, zero tool/LLM calls (also after restart) | Implemented, passing |
+| A03 | Same id, different parameters → 409; duplicate while running → 409; second concurrent id → 429; simultaneous identical posts run once | Implemented, passing |
+| A04 | Invalid ingredient/horizon/date/id/mode/extra field/body → 422 `INVALID_REQUEST`, nothing recorded | Implemented, passing |
+| A05 | `mode=live` without the flag → 403, no external call, no record; live with the flag → 501 | Implemented, passing |
+| A06 | HTTP deadline → 504 `ASSESSMENT_TIMEOUT` **while the run continues**; GET 202; re-POST 409; later GET returns the stored result; exactly one execution | Implemented, passing (redefined from "failed") |
+| A07 | Every `failed` response has no report and a sanitised error; unexpected exceptions leak nothing | Implemented, passing |
+| A08 | `GET /health` never leaks connection details | Implemented, passing |
+| A09 | Auth required on every protected endpoint; app refuses to start without a key | Implemented, passing |
+| A10 | Atomic persistence: no partial/temporary file on a failed replace; a reader never sees a partial record; crash-left marker ⇒ `ASSESSMENT_INTERRUPTED`, no re-run | Implemented, passing |
+| N01–N10 | n8n tests (`docs/n8n-workflow-blueprint.md`) | Planned |
 
-## 11. Open decisions for Day 4
-1. Confirm synchronous `POST` (switch to `202` + polling only if measured p95 > 120 s).
-2. GDELT retry/timeout policy (§7) and whether to change its 3-month window after the follow-up diagnostic.
-3. Approve installing `fastapi` and `uvicorn`; choose local n8n (Docker or `npx`).
-4. Whether `mode=mock` stays exposed outside demos.
+## 11. Decisions
+1. **Resolved:** `POST` stays synchronous; a deadline hit is "still running", recovered by bounded GET polling (measured latency 72–100 s; revisit only if p95 > 120 s).
+2. **Open (S6):** GDELT retry policy and optional-source rule (§5).
+3. **Resolved:** `fastapi` and `uvicorn` installed and pinned; n8n runs locally (not installed yet).
+4. `mode=mock` stays available; it is labelled everywhere. The n8n workflow sets `mode` from a constant (default `mock`).

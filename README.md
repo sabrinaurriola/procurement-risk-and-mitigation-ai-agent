@@ -163,13 +163,14 @@ Status words are used strictly: **implemented** = code exists and offline tests 
 | Evidence-provenance controls (`basis`, verbatim-quote citations, source tiers, contact redaction, severity indicators, removal of unsupported claims) | Implemented; **tested with mocks only** (added after live-002; not yet run live) |
 | Real alternative-supplier discovery with unverified leads | Implemented; **tested with mocks only** after the remediation (live-002 showed unsupported country attributions, now blocked by validation) |
 | Human-reviewed mitigation recommendations | Implemented; every action requires human approval |
+| Assessment HTTP API (FastAPI, **mock mode only**): auth, validation, idempotency, single-flight, atomic records, restart handling, deadline/recovery | Implemented and verified offline and in a real local process (Day 4 S1, `docs/day4-architecture.md` §15); live mode is not wired; committed separately (S1 commit) |
 
 ### Planned, not yet implemented
 
 | Capability | Status |
 | --- | --- |
 | Procurement-policy RAG: loading 25 chunks and embeddings into pgvector | **Loaded and embedded** (6 documents / 25 chunks, one embedding batch of 1,586 tokens); real pgvector retrieval verified; offline workflow with real retrieval verified; **not yet used in a live LangGraph run** |
-| n8n workflow integration and delivery | Planned; interface specified in [docs/api-specification.md](docs/api-specification.md) |
+| n8n intake/routing, Notion report archive, Gmail notification, Supabase operational-event log (`ops.operational_events`) | **Planned, not built.** Design: [docs/day4-architecture.md](docs/day4-architecture.md); interface: [docs/api-specification.md](docs/api-specification.md). Migration `002` is not applied; no n8n, Notion or Gmail connection exists |
 | Further report-quality evaluation and a second live evaluation after the remediation | Planned |
 | Two reviewed example reports | Scenarios A (normal) and B (stale-data limitation) defined and passing on mock data ([docs/demo-scenarios.md](docs/demo-scenarios.md)); live reports pending approvals |
 
@@ -191,7 +192,8 @@ Status words are used strictly: **implemented** = code exists and offline tests 
 - **Supabase PostgreSQL** — Structured procurement and commodity data
 - **pgvector** — Retrieval over embedded procurement documents
 - **Tavily / GDELT** — External web research and disruption signals, pending validation
-- **n8n** — Workflow triggers, report delivery, and delivery failure routing
+- **FastAPI / Uvicorn** — Assessment interface (implemented in mock mode, Day 4 S1)
+- **n8n, Notion, Gmail** — Intake, report archive and notification (**planned**, not built)
 - **Pydantic / pytest** — Output validation and automated tests
 - **Git / GitHub** — Version control and portfolio documentation
 
@@ -206,7 +208,8 @@ Procurement and supply-chain professionals interested in early risk assessment, 
 ## Verification status (11 Nov 2026)
 | Level | Result |
 |---|---|
-| Offline (mocks) | 490 passed, 47 opt-in skipped |
+| Offline (mocks) | 561 passed, 47 opt-in skipped (11 Nov, after Day 4 S1: 491 baseline + 70 API tests) |
+| API (Day 4 S1) | Real local uvicorn process, mock mode, read-only database data: auth, validation, replay, concurrency (409/429/202), 504-while-running recovery, restart replay and interrupted-run handling observed; recorded in `docs/day4-architecture.md` §15 |
 | Real read-only database | 48 passed (constraint tests run inside rolled-back transactions); row counts unchanged |
 | Live services | 2 assessments on 10 Nov (before the latest changes), 1 GDELT diagnostic on 11 Nov: GDELT returned HTTP 429 twice, then HTTP 200 with no articles |
 | Independent report audit | 10/10 on the mock scenarios; verifies structure and provenance, **not** the business quality of real LLM text |
