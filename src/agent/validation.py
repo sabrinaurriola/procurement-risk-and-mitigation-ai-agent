@@ -444,14 +444,53 @@ def inject_required_risks(draft: DraftReport, ctx: ValidationContext) -> tuple[D
     return (draft.model_copy(update={"risks": added}) if notes else draft), notes
 
 
+EXCERPT_MAX = 200          # every excerpt kept for diagnosis is bounded to this many characters
+DETAIL_CITATIONS_MAX = 3
+
+
+def _excerpt(text: str, limit: int = EXCERPT_MAX) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _removal_detail(kind: str, index: int, item, reason: str, by_id: dict[str, EvidenceItem]) -> dict:
+    """Diagnostic record of one discarded claim: type, id, reason, cited source ids and bounded excerpts (quote and the start of the source).
+    Public web text only (contact details were removed when the evidence was built); never credentials or prompts."""
+    ref = getattr(item, "risk_id", None) or f"{kind}[{index}]"
+    label = {"risks": "title", "mitigation_options": "option", "supplier_candidates": "name", "recommended_actions": "action"}[kind]
+    cites = list(getattr(item, "citations", []) or [])
+    ident = getattr(item, "identity_citation", None)
+    if ident is not None:
+        cites = [ident] + cites
+    sources = []
+    for c in cites[:DETAIL_CITATIONS_MAX]:
+        e = by_id.get(c.evidence_id)
+        sources.append({"evidence_id": c.evidence_id, "quote": _excerpt(c.quote),
+                        "source": _excerpt(f"{e.title} {e.snippet}") if e else "(unknown evidence id)"})
+    return {"kind": kind, "ref": ref, "label": _excerpt(str(getattr(item, label, "")), 80), "reason": _excerpt(reason),
+            "source_ids": [s["evidence_id"] for s in sources], "citations": sources,
+            "policy_refs": [{"policy_ref": p.policy_ref, "quote": _excerpt(p.quote)} for p in (getattr(item, "policy_citations", []) or [])[:2]]}
+
+
 def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_text: str, financial_available: bool,
                       max_candidates: int, money_allowed: set[Decimal] | None, ctx: ValidationContext,
                       max_passes: int = 4) -> tuple[DraftReport, list[str], list[str], list[str]]:
     """Remove ONLY the items whose support cannot be verified. Returns (draft, removed descriptions, notes, remaining
     problems). Remaining problems are non-empty when a problem cannot be fixed by removal (e.g. the summary)."""
+    out, removed, notes, problems, _ = prune_unsupported_detailed(draft, evidence, facts_text, financial_available, max_candidates,
+                                                                 money_allowed, ctx, max_passes)
+    return out, removed, notes, problems
+
+
+def prune_unsupported_detailed(draft: DraftReport, evidence: list[EvidenceItem], facts_text: str, financial_available: bool,
+                               max_candidates: int, money_allowed: set[Decimal] | None, ctx: ValidationContext,
+                               max_passes: int = 4) -> tuple[DraftReport, list[str], list[str], list[str], list[dict]]:
+    """prune_unsupported plus one diagnostic record per discarded claim (see _removal_detail)."""
     removed: list[str] = []
     notes: list[str] = []
     problems: list[str] = []
+    details: list[dict] = []
+    by_id = {e.evidence_id: e for e in evidence}
     for _ in range(max_passes):
         draft, n = inject_required_risks(draft, ctx)
         notes += [x for x in n if x not in notes]
@@ -461,12 +500,12 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
         # removed: wording problems (live demo-001) and a missing or too-short summary (live run of 13 Nov). Claims cannot reach the report through it.
         problems = [p for p in problems if not p.startswith("executive_summary")]
         if not problems:
-            return draft, removed, notes, []
+            return draft, removed, notes, [], details
         drop: dict[str, set[int]] = {}
         for p in problems:
             m = ITEM_RE.match(p)
             if not m:
-                return draft, removed, notes, problems
+                return draft, removed, notes, problems, details
             drop.setdefault(m.group(1), set()).add(int(m.group(2)))
         label = {"risks": lambda x: x.title, "mitigation_options": lambda x: x.option, "supplier_candidates": lambda x: x.name,
                  "recommended_actions": lambda x: x.action}
@@ -476,6 +515,7 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
             for i in sorted(idx):
                 reason = next(p for p in problems if p.startswith(f"{kind}[{i}]")).split(": ", 1)[1]
                 removed.append(f"{kind} '{label[kind](items[i])}' removed: {reason}")
+                details.append(_removal_detail(kind, i, items[i], reason, by_id))
             updates[kind] = [x for i, x in enumerate(items) if i not in idx]
         gone = {getattr(draft.risks[i], "risk_id") for i in drop.get("risks", set())}
         if gone:          # removal propagation: mitigations/actions that addressed ONLY removed risks go too (visibly); others just lose the reference
@@ -485,7 +525,9 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
                 for x in updates.get(kind, getattr(draft, kind)):
                     left = [a for a in x.addresses if a not in gone]
                     if x.addresses and not left:
-                        removed.append(f"{kind} '{label[kind](x)}' removed: it addressed only the removed risk(s) {', '.join(x.addresses)}")
+                        why = f"it addressed only the removed risk(s) {', '.join(x.addresses)}"
+                        removed.append(f"{kind} '{label[kind](x)}' removed: {why}")
+                        details.append(_removal_detail(kind, len(kept), x, why, by_id))
                     else:
                         trimmed += left != x.addresses
                         kept.append(x if left == x.addresses else x.model_copy(update={"addresses": left}))
@@ -493,4 +535,77 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
             if trimmed:
                 notes.append(f"REMOVED_RISK_REFERENCES_TRIMMED: {trimmed} item(s) no longer reference a removed risk ({', '.join(sorted(gone))})")
         draft = draft.model_copy(update=updates)
-    return draft, removed, notes, problems
+    return draft, removed, notes, problems, details
+
+
+# ───────── repair-candidate selection ─────────
+@dataclass
+class Candidate:
+    """One validated-and-pruned version of the report draft (the original draft, or the one returned by the LLM repair)."""
+    name: str                          # "original" | "repaired"
+    draft: DraftReport
+    removed: list[str]
+    notes: list[str]
+    remaining: list[str]               # problems that pruning cannot fix: such a candidate is NEVER eligible
+    details: list[dict]
+
+
+def _enforce_no_dangling(draft: DraftReport) -> tuple[DraftReport, list[str], list[dict]]:
+    """Post-condition: no mitigation or action may reference a risk that is not in the draft. An item left without any retained risk is removed
+    (visibly); an item that keeps some of its risks only loses the dead reference. Normally a no-op: prune_unsupported already propagates removals."""
+    ids = {r.risk_id for r in draft.risks}
+    removed: list[str] = []
+    details: list[dict] = []
+    updates = {}
+    for kind, label in (("mitigation_options", lambda x: x.option), ("recommended_actions", lambda x: x.action)):
+        kept = []
+        for x in getattr(draft, kind):
+            live = [a for a in x.addresses if a in ids]
+            if x.addresses and not live:
+                why = f"it referenced no retained risk ({', '.join(x.addresses)})"
+                removed.append(f"{kind} '{label(x)}' removed: {why}")
+                details.append(_removal_detail(kind, len(kept), x, why, {}))
+            else:
+                kept.append(x if live == x.addresses else x.model_copy(update={"addresses": live}))
+        updates[kind] = kept
+    changed = bool(removed) or any([a for a in x.addresses if a in ids] != x.addresses for k in updates for x in getattr(draft, k))
+    return (draft.model_copy(update=updates) if changed else draft), removed, details
+
+
+def prune_candidate(name: str, draft: DraftReport, notes: list[str], evidence: list[EvidenceItem], facts_text: str, financial_available: bool,
+                    max_candidates: int, money_allowed: set[Decimal] | None, ctx: ValidationContext) -> Candidate:
+    """Run one draft through the SAME prune_unsupported process used before, then enforce the no-dangling post-condition."""
+    pruned, removed, more_notes, remaining, details = prune_unsupported_detailed(
+        draft, evidence, facts_text, financial_available, max_candidates, money_allowed, ctx)
+    all_notes = list(notes) + [n for n in more_notes if n not in notes]
+    if not remaining:
+        pruned, extra_removed, extra_details = _enforce_no_dangling(pruned)
+        removed, details = removed + extra_removed, details + extra_details
+    return Candidate(name, pruned, removed, all_notes, remaining, details)
+
+
+def retained_chains(draft: DraftReport) -> int:
+    """Substantive completeness: how many retained risks have BOTH a retained mitigation and a retained recommended action addressing them."""
+    return sum(1 for r in draft.risks
+               if any(r.risk_id in m.addresses for m in draft.mitigation_options)
+               and any(r.risk_id in a.addresses for a in draft.recommended_actions))
+
+
+def retained_total(draft: DraftReport) -> int:
+    return len(draft.risks) + len(draft.mitigation_options) + len(draft.recommended_actions) + len(draft.supplier_candidates)
+
+
+def select_candidate(candidates: list[Candidate]) -> tuple[Candidate | None, dict]:
+    """Deterministic choice between the original and the repaired draft (after both were pruned):
+    1. only candidates with NO unfixable problem are eligible (more items never rescue an invalid draft);
+    2. most complete risk -> mitigation -> action chains first (substance before quantity);
+    3. then the most verified retained items overall;
+    4. on a genuine tie, the repaired draft.
+    Returns (chosen or None when nobody is eligible, diagnostics)."""
+    rows = [{"name": c.name, "eligible": not c.remaining, "chains": retained_chains(c.draft), "retained": retained_total(c.draft),
+             "removed": len(c.removed), "unfixable_problems": len(c.remaining)} for c in candidates]
+    eligible = [c for c in candidates if not c.remaining]
+    if not eligible:
+        return None, {"candidates": rows, "chosen": None}
+    best = max(eligible, key=lambda c: (retained_chains(c.draft), retained_total(c.draft), 1 if c.name == "repaired" else 0))
+    return best, {"candidates": rows, "chosen": best.name}

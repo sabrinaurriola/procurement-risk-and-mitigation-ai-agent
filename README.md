@@ -31,7 +31,7 @@ Trigger → research and tools → structured report:
 
 **Limitations (read before relying on any output)**
 
-- Only **sunflower oil** is functional. Wheat Flour, Granulated Sugar and Butter appear in the dropdown as placeholders and are refused.
+- Only **sunflower oil** is functional in this MVP. Wheat Flour, Granulated Sugar and Butter appear in the dropdown as placeholders and are refused.
 - Company data is synthetic. Exposure comes from synthetic contracts and a market benchmark, **not** from any real company's revenue.
 - The benchmark is not a supplier quote; crude oil is not refined oil.
 - GDELT is an optional source and often returns HTTP 429 or no articles; reports then rely on Tavily and say so.

@@ -29,7 +29,7 @@ from src.agent.render import render_markdown
 from src.agent.summary import compose_summary
 from src.agent.schemas import (AssessmentRequest, AssessmentResponse, DraftReport, ErrorInfo, EvidenceItem,
                                EvidenceJudgements, Execution, RefinedQueries, Report)
-from src.agent.validation import ValidationContext, inject_required_risks, prune_unsupported, validate_draft
+from src.agent.validation import ValidationContext, inject_required_risks, prune_candidate, select_candidate, validate_draft
 from src.calculations.exposure import calculate_exposure
 from src.rag.retrieve import PolicyResult, PolicyRetriever, build_queries
 from src.tools.search import SearchTool
@@ -98,6 +98,9 @@ class AgentState(TypedDict, total=False):
     removed: list[str]
     notes: list[str]
     repairs: int
+    first_draft: Any            # the original draft (after rule-based risk injection), kept while the LLM repair runs
+    first_notes: list[str]
+    discarded: list[dict]       # diagnostic records of discarded claims (bounded excerpts)
     error: dict | None
     response: Any
     trace: list[dict]
@@ -378,30 +381,41 @@ def build_graph(deps: Deps):
         problems: list[str] = []
         removed: list[str] = []
         notes: list[str] = []
+        details: list[dict] = []
+        choice: dict | None = None
+        extra: dict = {}
+        spot = PROFILES[state["request"]["ingredient"]].assumptions.spot_premium
+        ctx = ValidationContext(set(state.get("internal_refs", {})), list(state.get("indicators", [])), policy_map(state.get("policy")))
+        args = (state.get("evidence", []), facts_text(_facts(state)), state["financial"].status == "available",
+                lim.max_candidates, monetary_values(state["benchmark"], state["financial"], spot), ctx)
+        repair_used_up = state.get("repairs", 0) + 1 > lim.max_repairs
         try:
             parsed = raw if isinstance(raw := state["draft"], DraftReport) else DraftReport.model_validate(raw)
         except ValidationError as exc:
             problems = [f"schema: {'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()][:12]
             parsed = None
         if parsed is not None:
-            spot = PROFILES[state["request"]["ingredient"]].assumptions.spot_premium
-            ctx = ValidationContext(set(state.get("internal_refs", {})), list(state.get("indicators", [])), policy_map(state.get("policy")))
             # an internal exposure (coverage gap, non-approved supplier) is never silently omitted
             parsed, notes = inject_required_risks(parsed, ctx)
-            args = (state.get("evidence", []), facts_text(_facts(state)), state["financial"].status == "available",
-                    lim.max_candidates, monetary_values(state["benchmark"], state["financial"], spot), ctx)
             problems = validate_draft(parsed, *args)
-            if problems and state.get("repairs", 0) + 1 > lim.max_repairs:
-                # repair attempt used up: REMOVE what cannot be verified instead of keeping decorative citations
-                pruned, removed, more_notes, remaining = prune_unsupported(parsed, *args)
-                notes += [n for n in more_notes if n not in notes]
-                if not remaining:
-                    parsed, problems = pruned, []
+            if problems and state.get("repairs", 0) == 0:
+                extra = {"first_draft": parsed, "first_notes": list(notes)}     # keep it: the repair can make things worse
+        if problems and repair_used_up:
+            # The repair attempt is used up. Prune BOTH candidates with the same process (REMOVE what cannot be verified instead of keeping
+            # decorative citations) and keep the better one; the repaired draft is only a candidate, not automatically the winner.
+            cands = []
+            if parsed is not None:
+                cands.append(prune_candidate("repaired", parsed, notes, *args))
+            if state.get("first_draft") is not None:
+                cands.insert(0, prune_candidate("original", state["first_draft"], state.get("first_notes", []), *args))
+            chosen, choice = select_candidate(cands)
+            if chosen is not None:
+                parsed, problems, removed, notes, details = chosen.draft, [], chosen.removed, chosen.notes, chosen.details
         repairs = state.get("repairs", 0) + (1 if problems else 0)
         return {"draft": parsed if not problems else state["draft"], "problems": problems, "repairs": repairs,
-                "removed": removed, "notes": notes,
+                "removed": removed, "notes": notes, "discarded": details[:10], **extra,
                 "trace": _trace(state, "validate", problems=len(problems), repairs=repairs, removed=len(removed),
-                                first_problems=problems[:6], removed_items=removed[:10])}
+                                first_problems=problems[:6], removed_items=removed[:10], discarded=details[:10], selection=choice)}
 
     def route_after_validate(state: AgentState) -> str:
         if not state.get("problems"):
