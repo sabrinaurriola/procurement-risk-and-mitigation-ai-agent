@@ -14,21 +14,51 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.agent.budget import BudgetExceeded, PRICE_PER_M, enforce_budget, estimate_cost_usd  # noqa: F401  (PRICE_PER_M re-exported)
 from src.agent.data import PostgresData
 from src.agent.graph import Deps, run_assessment
 from src.agent.llm import LLMError, OpenAILLM
 from src.agent.mock import DemoLLM, MockSearch, build_mock_policy
 
 RUNS = Path(__file__).resolve().parents[2] / "runs"
-# USD per million tokens (input, output) from OpenAI's model page, checked 10 Nov 2026; verify before relying on it.
-PRICE_PER_M = {"gpt-5.4-mini": (0.75, 4.50)}
+REQUIRED_LIVE_SETTINGS = ("OPENAI_API_KEY", "OPENAI_MODEL", "TAVILY_API_KEY", "DATABASE_URL")      # names only; values are never read here
 
 
 def estimate_cost(model: str | None, input_tokens: int, output_tokens: int) -> float | None:
-    if model not in PRICE_PER_M:
-        return None
-    pin, pout = PRICE_PER_M[model]
-    return round(input_tokens / 1e6 * pin + output_tokens / 1e6 * pout, 6)
+    return estimate_cost_usd(model, input_tokens, output_tokens)
+
+
+class LiveRefused(Exception):
+    """A live run was refused before any external call. `reason` is ALLOW_PAID_CALLS, SETTINGS_MISSING: <names> or BUDGET: <estimates>."""
+
+    def __init__(self, reason: str = "ALLOW_PAID_CALLS"):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def build_live_deps(request_id: str, max_tokens: int = 40_000) -> Deps:
+    """The ONE place where live agent dependencies are wired (real Tavily, GDELT, OpenAI, pgvector policy RAG, read-only database).
+    Used by `--live` below and by the Gradio app. Raises LiveRefused or LLMError before any external call when not permitted."""
+    if os.getenv("ALLOW_PAID_CALLS") != "1":
+        raise LiveRefused("ALLOW_PAID_CALLS")
+    missing = [n for n in REQUIRED_LIVE_SETTINGS if not os.getenv(n)]
+    if missing:                                                    # refuse BEFORE any client exists: names only, never values
+        raise LiveRefused("SETTINGS_MISSING: " + ", ".join(missing))
+    try:
+        enforce_budget()                                           # estimated spend in runs/usage.jsonl + one-run reserve must stay under USD 5
+    except BudgetExceeded as exc:
+        raise LiveRefused(str(exc)) from None
+    from src.tools.search import GdeltTool, TavilyTool
+    llm = OpenAILLM(os.getenv("OPENAI_MODEL"), allow_paid=True, request_id=request_id,
+                    max_total_tokens=max_tokens, reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT") or None)
+    from src.rag.embed import EmbeddingError, OpenAIEmbedder
+    from src.rag.retrieve import PostgresPolicyRetriever
+    try:
+        embedder = OpenAIEmbedder(allow_paid=True, request_id=request_id)
+    except EmbeddingError:
+        embedder = None                     # policy retrieval then uses the full-text fallback
+    return Deps(PostgresData(), llm, TavilyTool(os.getenv("TAVILY_API_KEY")), GdeltTool(max_attempts=2),          # at most ONE retry (authorised limit)
+                policy=PostgresPolicyRetriever(embedder), require_research=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,24 +77,15 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")     # Windows consoles (cp1252) cannot print every report character
 
     if args.live:
-        if os.getenv("ALLOW_PAID_CALLS") != "1":
-            print("REFUSED: --live makes paid/quota-consuming calls (OpenAI, Tavily). Set ALLOW_PAID_CALLS=1 only after approval.")
-            return 3
-        from src.tools.search import GdeltTool, TavilyTool
         try:
-            llm = OpenAILLM(os.getenv("OPENAI_MODEL"), allow_paid=True, request_id=args.request_id,
-                            max_total_tokens=args.max_tokens, reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT") or None)
+            deps = build_live_deps(args.request_id, args.max_tokens)
+        except LiveRefused as exc:
+            print("REFUSED: --live makes paid/quota-consuming calls (OpenAI, Tavily). Set ALLOW_PAID_CALLS=1 only after approval."
+                  if exc.reason == "ALLOW_PAID_CALLS" else f"REFUSED: {exc.reason}")
+            return 3
         except LLMError as exc:
             print(f"REFUSED: {exc.code}")
             return 3
-        from src.rag.embed import EmbeddingError, OpenAIEmbedder
-        from src.rag.retrieve import PostgresPolicyRetriever
-        try:
-            embedder = OpenAIEmbedder(allow_paid=True, request_id=args.request_id)
-        except EmbeddingError:
-            embedder = None                     # policy retrieval then uses the full-text fallback
-        deps = Deps(PostgresData(), llm, TavilyTool(os.getenv("TAVILY_API_KEY")), GdeltTool(max_attempts=2),          # at most ONE retry (authorised limit)
-                    policy=PostgresPolicyRetriever(embedder), require_research=True)
     else:
         from datetime import date
         today = date.today()

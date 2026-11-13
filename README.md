@@ -1,215 +1,198 @@
-# PROCUREMENT RISK AGENT
+# Procurement Risk & Mitigation Agent
 
-### AI-Powered Procurement Risk Intelligence | Food Manufacturing · Spain
+AI-assisted procurement risk intelligence for an industrial bakery (Spain). A **LangGraph** agent researches the market, reads internal contracts and policies, calculates exposure deterministically and writes an evidence-backed risk and mitigation report. **n8n** archives the report in Notion and can e-mail it.
 
-[![Python](https://img.shields.io/badge/Python-3.x-blue)](https://www.python.org/)
-![Status](https://img.shields.io/badge/status-in%20development-orange)
-![Focus](https://img.shields.io/badge/focus-AI%20%7C%20Data%20Engineering%20%7C%20Automation-blue)
+> **Demo recording:** [Loom walkthrough](https://www.loom.com/share/3f1675d6e96b41f098145668226c3a26) *(link supplied by the author; confirm it opens without logging in before submitting)*
+> **Slides:** `presentation/project3_slides.pdf` *(placeholder: not added yet)*
+> **Sample report (PDF, live PARTIAL run of 13 Nov):** [examples/procurement-risk-assessment-ui-20261113-015628-ccc371.pdf](examples/procurement-risk-assessment-ui-20261113-015628-ccc371.pdf)
+> **n8n workflows:** [archive](docs/screenshots/n8n-archive-workflow.png) · [e-mail](docs/screenshots/n8n-email-workflow.png)
 
-**Procurement Risk Agent** is a Python-based portfolio project designed to combine external commodity data, procurement records, document retrieval, and AI-assisted research into a single **Procurement Risk Assessment & Mitigation Report**.
+**Decision support only.** The agent never approves suppliers, places orders or changes contracts. Bakery Foods Inc., its suppliers, contracts and forecasts are **fictional** and are labelled as such in every report; market data and research are real.
 
-It is intended for raw-material procurement managers who need to understand market disruptions, estimate exposure, and evaluate mitigation options before making sourcing decisions.
+- Why this stack: [stack_decision.md](stack_decision.md) · Next steps after the MVP: [gtm_future_sprints.md](gtm_future_sprints.md)
 
-The business scenario uses **Bakery Foods Inc.**, a fictional industrial bakery manufacturer headquartered in **Spain** (operating market, configurable), with Spanish and European suppliers. Fictional profile: ~800 employees, ~€175M annual revenue, 3 factories in Spain, a centralized procurement team, and key ingredients wheat/flour, sunflower oil and sugar. These are invented assumptions; the MVP covers sunflower oil and wheat, and exposure is calculated from synthetic contracts, forecasts and benchmarks, not from revenue.
+---
 
-> **Project status (11 November 2026, Day 3):** data layer, deterministic exposure engine, a bounded LangGraph workflow, evidence-provenance controls and a policy-RAG implementation are built. Verification: **490 offline tests** pass (47 opt-in skipped) and the opt-in read-only database tier passes (**537**, incl. the populated policy table); two live assessments were run on 10 Nov (before the provenance fixes and RAG) and one GDELT diagnostic on 11 Nov. The 25 fictional policy chunks are loaded and embedded in Supabase (`text-embedding-3-small`, 1,536 dims) and retrieval was checked against real pgvector (11 Nov, see implementation plan §16). One live end-to-end assessment of the current code (live-003, 11 Nov) finished PARTIAL (GDELT 429; 6 unverifiable items removed), structural audit 10/10, with content-quality defects listed in implementation plan §17. Targeted offline corrections for those defects (price direction, hypothetical shocks, other-market prices, SUP-003 escalation, unattributed cadence wording) are implemented and tested offline only (490 passed; 537 with the read-only database tier), **not yet re-tested with a live model** (plan section 18). POL-001 and ASM-003 were aligned on the conditional-supplier approval sequence and re-embedded (2 chunks, plan section 19). A final live run (live-004, 11 Nov) finished PARTIAL with correct figures, price direction and SUP-003 governance, but lost one risk and one action to the strict rules and left an unsupported sentence in the summary (plan section 20; CONDITIONAL GO). Those gaps were then corrected offline (plan section 21; not re-tested live). **Day 3 closure: CONDITIONAL GO for Day 4** — see [docs/day3-checkpoint.md](docs/day3-checkpoint.md) for the full snapshot and handoff. **Not yet done:** FastAPI, n8n. See [docs/implementation-plan.md](docs/implementation-plan.md) §6, §14–15 and [docs/day3-checkpoint.md](docs/day3-checkpoint.md).
+## 1. Business problem and user
 
-## The Problem
+Sunflower oil and wheat prices move with weather, geopolitics and supplier constraints. A **raw-material procurement manager** has to connect a market headline to the company's own contracts and forecast to know whether it matters: *what changed, how much of our volume is exposed, and which mitigation actions deserve human review?* Doing that by hand across news, price files, contracts and policy documents is slow and easy to get wrong.
 
-Bakery manufacturers rely on ingredients such as **sunflower oil** and **wheat/flour**, which are exposed to commodity-price movements, weather events, geopolitical disruptions, and supplier constraints.
+## 2. What the MVP does
 
-A procurement manager must connect external signals with internal supplier contracts and demand forecasts. Without that connection, a market headline may appear important but have little operational impact—or a genuine exposure may be overlooked.
+Trigger → research and tools → structured report:
 
-The project addresses a practical question:
+1. **Trigger:** the user picks a commodity and a horizon (1–6 months) in the Gradio app (or runs the CLI).
+2. **Internal data:** read-only SQL for contracts, forecasts and suppliers; a commodity price benchmark; policy passages retrieved with pgvector (RAG).
+3. **Research:** Tavily and GDELT, bounded to 3 rounds with fixed tool-call and time budgets.
+4. **Calculation:** fixed, index-linked and uncovered volume and a price-shock sensitivity, in Python with `Decimal` (the LLM never does arithmetic).
+5. **Drafting and validation:** the LLM drafts; code validates. Every finding declares its basis, external claims need a verbatim quote from a retained source, and unsupported claims are **removed visibly**.
+6. **Report:** a 17-section Markdown report and an 8-page PDF, with status `completed`, `partial` or `failed`.
+7. **Delivery (via n8n):** a completed or partial report is archived in Notion automatically; the e-mail with the PDF is sent only when the user clicks.
 
-> **What changed in the market, how could it affect our procurement exposure, and which mitigation actions deserve human review?**
+**Limitations (read before relying on any output)**
 
-## What the Project Is Designed to Do
+- Only **sunflower oil** is functional. Wheat Flour, Granulated Sugar and Butter appear in the dropdown as placeholders and are refused.
+- Company data is synthetic. Exposure comes from synthetic contracts and a market benchmark, **not** from any real company's revenue.
+- The benchmark is not a supplier quote; crude oil is not refined oil.
+- GDELT is an optional source and often returns HTTP 429 or no articles; reports then rely on Tavily and say so.
+- Alternative-supplier leads are real companies found by search, shown as **UNVERIFIED** with attributes only when a source states them.
+- Most live runs so far ended **PARTIAL** (unsupported items removed by validation), which is the intended behaviour.
+- Running the agent needs a populated PostgreSQL database (even in mock mode). There is no database-free demo.
 
-The intended MVP will:
-
-- Research market developments and supply disruptions for **sunflower oil and wheat**, prioritizing one complete ingredient workflow first.
-- Ingest and normalize selected commodity-price datasets using **Python and PostgreSQL**.
-- Retrieve fictional supplier, contract, and demand-forecast data through SQL.
-- Retrieve relevant procurement policies and supplier assessments using **RAG with pgvector**.
-- Calculate financial exposure scenarios through **deterministic Python functions**, not LLM arithmetic.
-- Discover **real alternative-supplier leads** with Tavily (up to three, possibly none), each labelled **UNVERIFIED** and each attribute (identity, product type, country) shown only when a source states it; otherwise `unknown`.
-- Generate an evidence-backed report with assumptions, source references, uncertainties, and recommended next steps.
-- Use **n8n** for request intake and report delivery.
-
-The agent is **advisory**. It cannot approve suppliers, commit spending, place purchase orders, or change contracts.
-
-## Data Sources and Integrations
-
-| Source / integration | Purpose | Current status |
-| --- | --- | --- |
-| **EU cereals prices (XLSX)** | Primary wheat benchmark: Spanish (`ES`) breadmaking common wheat | Downloaded; contains the Spanish series; ingestion not yet built |
-| **French cereals quotations (XLSX)** | Supplementary French wheat indicator | Downloaded; messy headers and `#REF!` cells; optional |
-| **European Commission oilseeds prices (XLSX)** | Primary sunflower oil benchmark (Spain, crude, weekly, EUR/tonne) | Loaded into PostgreSQL (308 observations, 2 market-stage series, quality-flagged) |
-| **European Commission Cereals REST API** | Direct cereals price retrieval | Tested; HTTP 500 errors, **not usable as an MVP dependency** |
-| **Tavily Search API** | Research and preliminary supplier discovery | One connectivity request succeeded (HTTP 200); relevance was mixed |
-| **GDELT DOC 2.0** | News and disruption signals | One connectivity request succeeded (HTTP 200); results were noisy |
-| **OpenAI API** | Language-model synthesis and document embeddings | Core infrastructure; planned; key and model not yet verified |
-| **Supabase PostgreSQL + pgvector** | Structured procurement data and document retrieval | PostgreSQL connectivity verified (`SELECT 1`); migration 001 applied (10 tables, pgvector 0.8.2); no data loaded yet |
-
-Tavily and GDELT are the two research APIs; a third research API is not required. OpenAI and Supabase are core infrastructure, and the European Commission files are official price sources ingested into PostgreSQL. FRED, MCP and LLM-as-a-Judge are optional and deferred.
-
-## Proposed Workflow
+## 3. Architecture
 
 ```text
-Procurement manager
+User (Gradio, 127.0.0.1)                       n8n (secondary stack)
+        |                                              ^
+        v                                              | HTTPS webhook + X-Webhook-Secret
+AppController (src/ui) ------ run ------> LangGraph agent (src/agent)
+        |                                   |-- load_internal: Postgres (read-only, parameterised SQL)
+        |                                   |-- calculate: Decimal exposure engine (src/calculations)
+        |                                   |-- policy RAG: pgvector (src/rag)
+        |                                   |-- search: Tavily + GDELT (src/tools)
+        |                                   |-- filter_evidence -> draft (OpenAI) -> validate / prune
+        |                                   v
+        |                          report.md + status (completed | partial | failed)
         |
-        v
-n8n: request form / webhook
-        |
-        v
-LangGraph (primary Python agent)
-        |
-        +--> External research tools (Tavily / GDELT)
-        |
-        +--> PostgreSQL: suppliers, contracts, demand forecasts
-        |
-        +--> pgvector: procurement policies and assessments
-        |
-        +--> PostgreSQL: normalized commodity price history
-        |
-        v
-Evidence review + deterministic Python calculations
-        |
-        v
-Report validation + explicit limitations
-        |
-        v
-n8n: deliver report or failure notification
-        |
-        v
-Procurement manager reviews decisions
+        +--> PDF (src/bridge/pdf.py) --> archive webhook --> Notion page (verified)
+                                    \--> email webhook (on click) --> Gmail, PDF attached
 ```
 
-**Architecture boundary:** LangGraph owns research orchestration and report generation. n8n is a thin automation layer; it does not perform the underlying analysis. **MCP** is an optional integration for one research tool, not a prerequisite for the MVP.
+LangGraph owns all analysis. n8n holds no analysis, LLM logic or database access, and never starts an assessment. Details: [docs/02-solution-architecture.md](docs/02-solution-architecture.md) and [docs/day4-architecture.md](docs/day4-architecture.md).
 
-## Project Structure
+## 4. Tools and APIs
 
-**Proposed repository layout** (folders are added as components are built):
+| Tool / API | Used for |
+|---|---|
+| **OpenAI** (LLM + `text-embedding-3-small`) | Evidence screening, drafting, policy embeddings |
+| **Tavily Search** | Market-risk research and alternative-supplier discovery |
+| **GDELT DOC 2.0** | News signals (optional source) |
+| **Supabase PostgreSQL + pgvector** | Contracts, forecasts, benchmark prices, policy chunks |
+| **European Commission oilseeds prices (XLSX)** | Sunflower-oil benchmark, ingested into Postgres |
+| **n8n + Notion + Gmail** | Report archive and optional e-mail |
+| LangGraph, Gradio, FastAPI, fpdf2, Pydantic, pytest | Orchestration, UI, assessment API, PDF, validation, tests |
 
-```text
-procurement-risk-agent/
-├── README.md
-├── docs/
-│   ├── 01-business-case.md
-│   ├── 02-solution-architecture.md
-│   └── 03-ai-workflow-evaluation.md
-├── src/
-│   ├── ingestion/             # External files / API normalization
-│   ├── agent/                 # LangGraph workflow and tools
-│   ├── retrieval/             # SQL and document retrieval
-│   └── calculations/          # Deterministic exposure scenarios
-├── tests/                     # Unit and failure tests
-├── examples/                  # Reviewed sample reports
-├── n8n/                       # Actual workflow exports when ready
-├── .env.example
-└── requirements.txt
+Deferred and not built: FRED, MCP, LLM-as-a-Judge, public-risk monitoring of existing suppliers.
+
+## 5. Setup
+
+Requirements: **Python 3.13**, a Supabase (PostgreSQL with `pgvector`) project, and for live runs an OpenAI key and a Tavily key.
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate            # Windows; on macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env              # then edit .env (never commit it)
+python -m src.bridge.fonts --fetch   # downloads DejaVu fonts (SHA-256 checked) for the PDF
 ```
 
-### Design documentation
+### Environment variables (names only; real values go in the git-ignored `.env`)
 
-- [Business Case](docs/01-business-case.md) — Business problem, user, value hypothesis, MVP boundaries.
-- [Solution Architecture](docs/02-solution-architecture.md) — Components, data flow, responsibilities, and integrations.
-- [AI & Workflow Design Evaluation](docs/03-ai-workflow-evaluation.md) — AI boundaries, safeguards, evaluation criteria, and test cases.
+| Variable | Needed for |
+|---|---|
+| `DATABASE_URL` | Every run (Supabase session-pooler URI; the agent only reads) |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Live runs and policy embeddings |
+| `TAVILY_API_KEY` | Live runs |
+| `OPERATING_MARKET` | Optional (default Spain) |
+| `ALLOW_PAID_CALLS` | Set to `1` in the **process** that is allowed to make paid calls |
+| `LIVE_BUDGET_USD`, `OPENAI_REASONING_EFFORT` | Optional budget limit (default USD 5) and reasoning effort |
+| `N8N_ARCHIVE_WEBHOOK_URL`, `N8N_EMAIL_WEBHOOK_URL`, `N8N_WEBHOOK_SECRET` | Archive and e-mail through n8n (HTTPS URLs; secret sent as `X-Webhook-Secret`) |
+| `PDF_FONT_DIR` | Optional font folder override |
+| `ASSESSMENT_API_KEY`, `ASSESSMENT_STORE_DIR`, `ASSESSMENT_DEADLINE_SECONDS` | Optional FastAPI service only |
 
-## Getting Started
+### Database (one-time; these commands write to your own database)
 
-**A runnable setup is not available yet.** The repository will include verified installation commands, environment variables, sample data initialization, and a demo request **after** the first end-to-end workflow is implemented.
+```bash
+python -m src.db.migrate                 # dry run; add --apply to create the schema (sql/001_schema.sql)
+python -m src.ingestion.load_synthetic   # dry run; add --apply to load the synthetic CSVs
+python -m src.ingestion.ec_oilseeds      # dry run; needs data/raw/European_Commission_Oilseeds_Prices.xlsx (see data/raw/MANIFEST.md); add --apply
+python -m src.rag.load_policies          # dry run; --apply loads the policy chunks, --apply then --embed embeds them (paid; needs ALLOW_PAID_CALLS=1)
+```
 
-Planned requirements include Python 3, a PostgreSQL database with pgvector, and API credentials for the external integrations ultimately selected. Secrets will be managed through environment variables and excluded from version control.
+All pipelines are dry-run by default and idempotent. The EC workbook is third-party data and is **not** in the repository.
 
-Until then, the design documents describe the intended system; they are **not** instructions for running a finished application.
+## 6. Run it
 
-## Evaluation and Limitations
+**Offline tests (no network, no paid calls):**
 
-The prototype will be evaluated on:
+```bash
+python -m pytest tests -q
+```
 
-- **Evidence quality:** Material external claims are traceable to dated sources.
-- **Business relevance:** Findings relate to the ingredient, geography, and assessment horizon.
-- **Calculation accuracy:** Exposure scenarios pass deterministic unit tests.
-- **Missing-data behavior:** The system does not invent unavailable prices, forecasts, or supplier qualifications.
-- **Workflow reliability:** API failures, malformed outputs, and delivery failures produce visible statuses and safe fallbacks.
-- **Report usefulness:** A reviewer can identify risks, assumptions, options, and decisions requiring approval.
+**Mock mode** (fixture research and template text; real read-only database data; no paid call):
 
-**Priority planned tests:** successful sunflower oil assessment; research API timeout; missing contract price; known financial calculation; invalid report schema. An offline **LLM-as-a-Judge** review may supplement—but not replace—manual and deterministic checks.
+```bash
+python -m src.ui.gradio_app --mock         # then open http://127.0.0.1:7860
+python -m src.agent.run --mock             # CLI; writes runs/local-001.md
+```
 
-No accuracy score, time saving, ROI, or production reliability is claimed before testing.
+**Live mode** (real Tavily, GDELT and OpenAI; paid). Authorization controls:
 
-## Scope and Status
+- It runs only in a process that has `ALLOW_PAID_CALLS=1`; otherwise it is refused before any external call.
+- It is refused when `OPENAI_API_KEY`, `OPENAI_MODEL`, `TAVILY_API_KEY` or `DATABASE_URL` is missing.
+- A budget guard blocks the run once logged spend (`runs/usage.jsonl`) would exceed `LIVE_BUDGET_USD` (default USD 5); a 40,000-token cap applies per run.
+- The Gradio app allows one paid run per launch (`--max-live-runs`).
+- If research cannot run, the run fails visibly. It never falls back to fixtures.
 
-Status words are used strictly: **implemented** = code exists and offline tests pass; **tested with mocks** = exercised only against recorded/mocked responses; **tested live** = run against the real service at least once (see `docs/implementation-plan.md` §11–§13); **planned** = not built.
+```powershell
+$env:ALLOW_PAID_CALLS="1"
+python -m src.ui.gradio_app                 # open http://127.0.0.1:7860 and press Run Assessment
+python -m src.agent.run --live              # CLI equivalent
+```
 
-### Supplier intelligence: three separate capabilities
+The app binds to `127.0.0.1` only (no share link, no analytics). Start the optional assessment API with `python -m uvicorn src.api.app:create_app --factory --host 127.0.0.1 --port 8000` (needs `ASSESSMENT_API_KEY`; mock mode only).
 
-| Capability | Scope | What it means |
-| --- | --- | --- |
-| **A. Internal supplier and contract exposure** | In MVP | Five **fictional** suppliers, their synthetic contracts, approval statuses and demand forecasts represent Bakery Foods Inc.'s simulated internal environment. They are never replaced by or attributed to real companies. |
-| **B. Real alternative-supplier discovery** | In MVP | Tavily finds **real companies** that might supply sunflower oil. They are sourcing leads, not suppliers: always `UNVERIFIED`, attributes only if a source states them, crude vs refined distinguished, independent verification and qualification required. |
-| **C. Public-risk monitoring of existing suppliers** | **Future enhancement, not implemented** | With a client's real supplier master data, the agent could monitor publicly reported supplier-specific events (plant closure, insolvency, strike, sanctions) and map a verified event to contracts and *potentially affected* volume. Not meaningful with fictional suppliers, so it is out of scope. |
+## 7. n8n integration
 
-### Implemented MVP capabilities
+1. Import `n8n/procurement-report-archive.json` and `n8n/procurement-report-email.json` into your n8n.
+2. Create the Notion databases from [docs/notion-database-schemas.md](docs/notion-database-schemas.md); fill the placeholders in each workflow's `Config` node (database ids; for the e-mail workflow, the recipient).
+3. Create a **Header Auth** credential (header `X-Webhook-Secret`) and attach it to both webhooks; add your Notion and Gmail credentials.
+4. Publish the workflows and put their **Production** URLs and the same secret in `.env` (`N8N_ARCHIVE_WEBHOOK_URL`, `N8N_EMAIL_WEBHOOK_URL`, `N8N_WEBHOOK_SECRET`).
 
-| Capability | Status |
-| --- | --- |
-| Fictional internal suppliers, contracts and forecasts (CSV → PostgreSQL, idempotent) | Implemented; loaded in Supabase; read-only use in live runs |
-| Official commodity benchmark (EC Spanish crude sunflower oil, 308 observations, quality-flagged) | Implemented; loaded in Supabase |
-| Deterministic financial exposure (fixed / index-linked / uncovered) | Implemented; offline tests; figures verified in two live runs |
-| External market-risk research (Tavily, GDELT) | Implemented; tested live twice (live-002: Tavily returned results; GDELT returned HTTP 200 with zero articles, cause not yet diagnosed) |
-| Evidence-provenance controls (`basis`, verbatim-quote citations, source tiers, contact redaction, severity indicators, removal of unsupported claims) | Implemented; **tested with mocks only** (added after live-002; not yet run live) |
-| Real alternative-supplier discovery with unverified leads | Implemented; **tested with mocks only** after the remediation (live-002 showed unsupported country attributions, now blocked by validation) |
-| Human-reviewed mitigation recommendations | Implemented; every action requires human approval |
-| Assessment HTTP API (FastAPI, **mock mode only**): auth, validation, idempotency, single-flight, atomic records, restart handling, deadline/recovery | Implemented and verified offline and in a real local process (Day 4 S1, `docs/day4-architecture.md` §15); live mode is not wired; committed separately (S1 commit) |
+![Archive workflow](docs/screenshots/n8n-archive-workflow.png)
 
-### Planned, not yet implemented
+![E-mail workflow](docs/screenshots/n8n-email-workflow.png)
 
-| Capability | Status |
-| --- | --- |
-| Procurement-policy RAG: loading 25 chunks and embeddings into pgvector | **Loaded and embedded** (6 documents / 25 chunks, one embedding batch of 1,586 tokens); real pgvector retrieval verified; offline workflow with real retrieval verified; **not yet used in a live LangGraph run** |
-| n8n intake/routing, Notion report archive, Gmail notification, Supabase operational-event log (`ops.operational_events`) | **Planned, not built.** Design: [docs/day4-architecture.md](docs/day4-architecture.md); interface: [docs/api-specification.md](docs/api-specification.md). Migration `002` is not applied; no n8n, Notion or Gmail connection exists |
-| Further report-quality evaluation and a second live evaluation after the remediation | Planned |
-| Two reviewed example reports | Scenarios A (normal) and B (stale-data limitation) defined and passing on mock data ([docs/demo-scenarios.md](docs/demo-scenarios.md)); live reports pending approvals |
+The screenshots show the workflow canvases (no executions). The exports contain no credentials. See [n8n/README.md](n8n/README.md) for the workflow list.
 
-### Out of scope / potential future enhancements
+## 8. File map
 
-- Monitoring actual existing suppliers with real supplier master data; supplier-specific disruption-to-contract exposure mapping (potentially affected volume is never presented as confirmed delivery loss or financial loss).
-- Automated supplier qualification or onboarding; live supplier quotations, capacity verification and commercial negotiation.
-- Automatic supplier switching, purchasing or contract execution.
-- Optional FRED integration, MCP tooling, a more sophisticated evaluation system (e.g. LLM-as-a-Judge).
-- Production ERP integration, alerting and monitoring.
+| Path | Purpose |
+|---|---|
+| `src/agent/` | LangGraph workflow (`graph.py`), prompts, evidence validation, report rendering, live controls (`run.py`, `budget.py`, `live_record.py`) |
+| `src/calculations/` | Deterministic exposure engine (`Decimal`) |
+| `src/rag/`, `src/db/`, `sql/` | Policy chunking, embeddings and retrieval; migrations and SQL guard; schema |
+| `src/ingestion/`, `src/synthetic/`, `data/synthetic/` | EC benchmark ingestion; validated synthetic company data and policy documents |
+| `src/tools/` | Tavily and GDELT wrappers |
+| `src/ui/` | Gradio app and controller |
+| `src/bridge/` | Webhook client for n8n, payload builder, PDF exporter, font installer |
+| `src/api/` | Optional FastAPI assessment service (mock mode only) |
+| `n8n/` | Workflow exports and the script that generates them |
+| `tests/` | Offline test suite (mocked services; an in-process n8n/Notion simulator) |
+| `docs/` | Business case, architecture, evaluation, implementation records (see below) |
+| `stack_decision.md`, `gtm_future_sprints.md` | Submission deliverables |
+| `examples/`, `docs/screenshots/` | Sample report PDF; n8n workflow canvases |
+| `runs/` (git-ignored) | Local reports, live run records and `usage.jsonl` |
+| `CLAUDE.md` | Project rules and safety boundaries |
 
-## Tech Stack
+**Documentation:** [01-business-case](docs/01-business-case.md) · [02-solution-architecture](docs/02-solution-architecture.md) · [03-ai-workflow-evaluation](docs/03-ai-workflow-evaluation.md) · [implementation-plan](docs/implementation-plan.md) · [day4-architecture](docs/day4-architecture.md) (sections 19–25: Gradio, n8n, PDF, live runs) · [notion-database-schemas](docs/notion-database-schemas.md) · [api-specification](docs/api-specification.md).
 
-**Planned implementation:**
+## 9. Verified status
 
-- **Python** — Data ingestion, API integration, validation, and calculations
-- **LangGraph** — Stateful AI agent orchestration
-- **OpenAI API** — LLM analysis and embeddings
-- **Supabase PostgreSQL** — Structured procurement and commodity data
-- **pgvector** — Retrieval over embedded procurement documents
-- **Tavily / GDELT** — External web research and disruption signals, pending validation
-- **FastAPI / Uvicorn** — Assessment interface (implemented in mock mode, Day 4 S1)
-- **n8n, Notion, Gmail** — Intake, report archive and notification (**planned**, not built)
-- **Pydantic / pytest** — Output validation and automated tests
-- **Git / GitHub** — Version control and portfolio documentation
+Statuses mean: **tested offline** = automated tests pass with mocked services; **run live** = executed against the real service with evidence in `runs/` (local, not committed); **not verified** = no evidence in this repository.
 
-## Intended Audience
+| Area | Status |
+|---|---|
+| Agent, calculations, validation, RAG logic, PDF, bridge client, Gradio controller | Tested offline: 1250 tests passed, 45 opt-in database tests skipped (13 Nov 2026) |
+| Supabase data (synthetic data, 308 EC benchmark observations, 25 policy chunks with embeddings) | Loaded and read live; policy retrieval checked against real pgvector |
+| Live assessments (Tavily + GDELT + OpenAI, gpt-5.4-mini) | Run live on 10, 11 and 13 Nov. Eight Gradio runs on 13 Nov are recorded (1 failed before a validation fix, 1 completed, 6 partial); each cost about USD 0.04, cumulative estimate USD 0.55 of the USD 5 limit. GDELT often unavailable |
+| Notion archive and Gmail e-mail through n8n | Exercised by the project owner against real Notion and Gmail during integration (archive verified, e-mail received). Screenshots and execution exports are **not** in the repository |
+| `ops.operational_events` log (migration `002`) | **Planned, not built.** Draft SQL only in `sql/drafts/` |
+| FastAPI service | Offline tests and a local mock-mode run; live mode not wired |
+| Business validation, user feedback, accuracy, ROI | **None yet** (see [gtm_future_sprints.md](gtm_future_sprints.md)) |
 
-Procurement and supply-chain professionals interested in early risk assessment, and technical reviewers evaluating **AI engineering, data engineering, business-process integration, and safe agent design**.
+No accuracy, time-saving or ROI claim is made.
 
 ## Disclaimer
 
-**Bakery Foods Inc. and its internal procurement records are fictional.** The project is an experimental decision-support prototype, not a live procurement system. External sources may be incomplete or outdated; supplier candidates require independent qualification. Financial impact figures are hypothetical scenarios unless backed by explicitly identified inputs. All procurement decisions remain subject to human review and approval.
-
-## Verification status (11 Nov 2026)
-| Level | Result |
-|---|---|
-| Offline (mocks) | 561 passed, 47 opt-in skipped (11 Nov, after Day 4 S1: 491 baseline + 70 API tests) |
-| API (Day 4 S1) | Real local uvicorn process, mock mode, read-only database data: auth, validation, replay, concurrency (409/429/202), 504-while-running recovery, restart replay and interrupted-run handling observed; recorded in `docs/day4-architecture.md` §15 |
-| Real read-only database | 48 passed (constraint tests run inside rolled-back transactions); row counts unchanged |
-| Live services | 2 assessments on 10 Nov (before the latest changes), 1 GDELT diagnostic on 11 Nov: GDELT returned HTTP 429 twice, then HTTP 200 with no articles |
-| Independent report audit | 10/10 on the mock scenarios; verifies structure and provenance, **not** the business quality of real LLM text |
+Bakery Foods Inc. and its internal procurement records are fictional. This is an experimental decision-support prototype, not a procurement system. External sources may be incomplete or outdated; supplier candidates need independent qualification. Financial figures are scenarios built from the stated inputs. All procurement decisions need human review and approval.

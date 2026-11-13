@@ -457,8 +457,9 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
         notes += [x for x in n if x not in notes]
         problems = validate_draft(draft, evidence, facts_text, financial_available, max_candidates, money_allowed, ctx)
         # The LLM's executive_summary is discarded: _finalize replaces it with a summary assembled by code from the retained findings.
-        # Wording problems in it cannot be fixed by removing an item and must not fail the run (live demo-001); a missing/too-short summary still blocks.
-        problems = [p for p in problems if not (p.startswith("executive_summary:") and "missing or too short" not in p)]
+        # NO problem in that discarded text can be fixed by removing an item, and none may fail the run or block the removal of the items that CAN be
+        # removed: wording problems (live demo-001) and a missing or too-short summary (live run of 13 Nov). Claims cannot reach the report through it.
+        problems = [p for p in problems if not p.startswith("executive_summary")]
         if not problems:
             return draft, removed, notes, []
         drop: dict[str, set[int]] = {}
@@ -474,7 +475,22 @@ def prune_unsupported(draft: DraftReport, evidence: list[EvidenceItem], facts_te
             items = getattr(draft, kind)
             for i in sorted(idx):
                 reason = next(p for p in problems if p.startswith(f"{kind}[{i}]")).split(": ", 1)[1]
-                removed.append(f"{kind} '{label[kind](items[i])[:80]}' removed: {reason}")
+                removed.append(f"{kind} '{label[kind](items[i])}' removed: {reason}")
             updates[kind] = [x for i, x in enumerate(items) if i not in idx]
+        gone = {getattr(draft.risks[i], "risk_id") for i in drop.get("risks", set())}
+        if gone:          # removal propagation: mitigations/actions that addressed ONLY removed risks go too (visibly); others just lose the reference
+            trimmed = 0
+            for kind in ("mitigation_options", "recommended_actions"):
+                kept = []
+                for x in updates.get(kind, getattr(draft, kind)):
+                    left = [a for a in x.addresses if a not in gone]
+                    if x.addresses and not left:
+                        removed.append(f"{kind} '{label[kind](x)}' removed: it addressed only the removed risk(s) {', '.join(x.addresses)}")
+                    else:
+                        trimmed += left != x.addresses
+                        kept.append(x if left == x.addresses else x.model_copy(update={"addresses": left}))
+                updates[kind] = kept
+            if trimmed:
+                notes.append(f"REMOVED_RISK_REFERENCES_TRIMMED: {trimmed} item(s) no longer reference a removed risk ({', '.join(sorted(gone))})")
         draft = draft.model_copy(update=updates)
     return draft, removed, notes, problems

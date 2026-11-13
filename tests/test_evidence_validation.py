@@ -335,8 +335,15 @@ def test_only_unsupported_items_are_removed_and_reported():
 
 
 def test_unfixable_global_problems_are_not_hidden_by_removal():
-    out, removed, _, remaining = prune(good_draft(executive_summary="ok"))
-    assert remaining and any("executive_summary" in x for x in remaining)
+    out, removed, _, remaining = prune(good_draft(risks=[cov_risk(), sup_risk(), risk(), risk(title="Second risk with the same id")]))
+    assert remaining and any("risk_id R3 is used more than once" in x for x in remaining)
+
+
+def test_a_missing_or_short_discarded_summary_never_blocks_the_removal_of_unsupported_items():
+    bad = risk(risk_id="R9", title="Unsupported claim", citations=[cite("E1", "this quote does not appear in the evidence item at all, so it is unsupported")])
+    for summary in ("", "ok"):
+        out, removed, _, remaining = prune(good_draft(executive_summary=summary, risks=[cov_risk(), sup_risk(), bad]))
+        assert remaining == [] and [r.risk_id for r in out.risks] == ["R1", "R2"] and any("Unsupported claim" in x for x in removed)
 
 
 def test_required_internal_risks_are_added_by_rule_when_the_draft_omits_them():

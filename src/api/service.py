@@ -63,15 +63,29 @@ class AssessmentService:
         self._finished: dict[str, dict[str, Any]] = {}       # read-through cache; also serves a record whose file write failed (until restart)
 
     # ───────── events (never raise into the request path) ─────────
-    def _emit(self, events: list[OperationalEvent]) -> None:
+    def _emit(self, events: list[OperationalEvent | None]) -> None:
         for e in events:
+            if e is None:                  # an event that could not be built (see _ev) is skipped
+                continue
             try:
                 self.sink.emit(e)
             except Exception as exc:          # a failing sink must never change an assessment
                 log.error("event sink failed (%s) for %s", type(exc).__name__, e.event_type)
 
-    def _ev(self, rid: str, etype: str, mode: str | None, **kw: Any) -> OperationalEvent:
-        return OperationalEvent(event_key=f"{rid}|{etype}|{uuid.uuid4().hex[:12]}", request_id=rid, event_type=etype, mode=mode, **kw)
+    def _ev(self, rid: str, etype: str, mode: str | None, **kw: Any) -> OperationalEvent | None:
+        try:
+            return OperationalEvent(event_key=f"{rid}|{etype}|{uuid.uuid4().hex[:12]}", request_id=rid, event_type=etype, mode=mode, **kw)
+        except Exception as exc:              # validation failure: log the class only (the message may echo values) and carry on
+            log.error("event construction failed (%s) for %s", type(exc).__name__, etype)
+            return None
+
+    def _derive(self, env: dict[str, Any]) -> list[OperationalEvent]:
+        """Events for a finished envelope. Any failure yields no events: derivation must never affect an assessment or its recovery."""
+        try:
+            return events_from_envelope(env, model=self.model)
+        except Exception as exc:
+            log.error("event derivation failed (%s) for %s", type(exc).__name__, env.get("request_id"))
+            return []
 
     # ───────── records ─────────
     def _get_final(self, rid: str) -> dict[str, Any] | None:
@@ -82,7 +96,7 @@ class AssessmentService:
             self._finished[rid] = rec
         return rec
 
-    def _recover_dead_run(self, rid: str) -> list[OperationalEvent]:
+    def _recover_dead_run(self, rid: str) -> list[OperationalEvent | None]:
         """Caller holds the lock. A marker with no live worker in this process means the previous process died mid-run."""
         if rid in self._running:
             return []
@@ -98,12 +112,12 @@ class AssessmentService:
         self.store.clear_run(rid)
         self._finished[rid] = rec
         log.warning("assessment %s marked interrupted (no live worker)", rid)
-        return [self._ev(rid, "assessment.interrupted", mode, severity="error", error_code="ASSESSMENT_INTERRUPTED"), *events_from_envelope(env)]
+        return [self._ev(rid, "assessment.interrupted", mode, severity="error", error_code="ASSESSMENT_INTERRUPTED"), *self._derive(env)]
 
     # ───────── submit ─────────
     def submit(self, req: ApiRequest, deadline_seconds: float) -> Result:
         rid, h = req.request_id, request_hash(req)
-        pending_events: list[OperationalEvent] = []
+        pending_events: list[OperationalEvent | None] = []
         try:
             with self._lock:
                 pending_events += self._recover_dead_run(rid)
@@ -167,11 +181,7 @@ class AssessmentService:
             self.store.clear_run(rid)
         except Exception as exc:
             log.error("persisting %s failed (%s); served from memory until restart", rid, type(exc).__name__)
-        try:
-            events = events_from_envelope(env, model=self.model)
-        except Exception as exc:
-            log.error("event derivation failed (%s) for %s", type(exc).__name__, rid)
-            events = []
+        events = self._derive(env)
         with self._lock:
             self._finished[rid] = rec
             self._running.pop(rid, None)

@@ -18,7 +18,8 @@
 | `POST /assessments` | Run (or replay) one assessment. **Synchronous wait** up to the deadline; envelope in §4 | Implemented, verified |
 | `GET /assessments/{request_id}` | `200` stored envelope · `202` still running · `404` unknown | Implemented, verified |
 | `GET /assessments/{request_id}/report.md` | The report as `text/markdown`; `404 REPORT_NOT_AVAILABLE` for a failed run; `202`/`404` as above | Implemented, verified |
-| `GET /assessments/{request_id}/notion-blocks` | Deterministic flat block rendering for the Notion archive (`report_sha256`, `total_blocks`, `blocks[]`) | **Planned (S3)** |
+| `GET /assessments/{request_id}/notion-blocks?offset=0&limit=100` | Deterministic flat Notion-block rendering of the stored report, paginated (`limit` 1–100, `offset` ≥ 0, else `422`). Body: `report_sha256` (SHA-256 of the **exact** `report.md` bytes, never altered), `canonical_sha256` (what the blocks reproduce: layout-normalised, see `src/api/notion_blocks.py`), `blocks_sha256`, `total_blocks`, `offset`, `limit`, `count`, `next_offset`, `page{title, properties}` (no report text), `blocks[]`. Every text object ≤ 2,000 characters, ≤ 100 per block. `202` while running, `404 REPORT_NOT_AVAILABLE` for a failed/unknown record | **Implemented, tested offline (S3)** |
+| `POST /assessments/{request_id}/notion-verify` | Read-only. Body `{"children":[…]}` = the blocks currently on the Notion page. Returns `prefix_ok`, `mismatch_index`, `existing`, `total_blocks`, `complete`, `next_offset`: the existing blocks must equal the expected rendering **by type and text, index by index** (counting alone is not accepted). Never starts or changes an assessment | **Implemented, tested offline (S3)** |
 | `POST /assessments/{request_id}/events` | n8n reports `archive.*` / `delivery.*` outcomes; allow-listed; `404` if the id is unknown | **Planned (S3)** |
 OpenAPI/docs endpoints are disabled. Run with **one** worker: the single-flight registry is in memory.
 
@@ -60,7 +61,7 @@ A finished request always returns this shape (HTTP 200 unless stated; **n8n bran
 | **`partial`** | A validated report is delivered, but at least one required component is missing or degraded; its limits are shown prominently. | Any of: `FINANCIAL_UNAVAILABLE` · benchmark `stale` or `unavailable` · `RESEARCH_SOURCE_TAVILY` / `RESEARCH_SOURCE_GDELT` unavailable, partially failed or not configured · `NO_RELEVANT_EVIDENCE` · `NO_STRONG_EXTERNAL_EVIDENCE` · `UNSUPPORTED_CLAIMS_REMOVED` · `POLICY_CONTEXT_UNAVAILABLE`. |
 | **`failed`** | **No report.** Nothing is presented as an assessment. | Error code in §6. |
 
-**Approved, NOT implemented (D7):** GDELT becomes an optional source. Its failure stays visible (warning, event, Notion, e-mail) but is not by itself PARTIAL while Tavily is OK and neither `NO_RELEVANT_EVIDENCE` nor `NO_STRONG_EXTERNAL_EVIDENCE` applies. Claim removals, Tavily failure, a stale/unavailable benchmark and unavailable financials still ⇒ PARTIAL. **Until the S6 report-quality slice implements and tests this, the table above is the behaviour.**
+**Implemented on 13 Nov 2026 (D7; tested offline, not yet validated by a live run):** GDELT is an optional source. Its failure stays visible (warning, event, Notion, e-mail) but is not by itself PARTIAL while Tavily is OK and neither `NO_RELEVANT_EVIDENCE` nor `NO_STRONG_EXTERNAL_EVIDENCE` applies. Claim removals, Tavily failure, a stale/unavailable benchmark and unavailable financials still ⇒ PARTIAL. The first matching row of the table above therefore applies to GDELT only when Tavily failed or the evidence is insufficient (`docs/day4-architecture.md` section 24).
 
 Not partial by themselves (warning only): `OVER_COMMITMENT`, `POLICY_RETRIEVAL_FALLBACK`, `RULE_BASED_RISK_ADDED`, `ASSESSMENT_DATE_OVERRIDE`, `MOCK RUN`, a research source answering HTTP 200 with no articles while another source supplied strong evidence. Warnings are never dropped from the envelope.
 
@@ -129,6 +130,6 @@ Files: `src/api/{app,models,store,events,runners,service}.py`, `tests/{api_fixtu
 
 ## 11. Decisions
 1. **Resolved:** `POST` stays synchronous; a deadline hit is "still running", recovered by bounded GET polling (measured latency 72–100 s; revisit only if p95 > 120 s).
-2. **Open (S6):** GDELT retry policy and optional-source rule (§5).
+2. **Done (13 Nov, offline):** the optional-source rule (§5). **Open:** GDELT retry policy validated against live behaviour.
 3. **Resolved:** `fastapi` and `uvicorn` installed and pinned; n8n runs locally (not installed yet).
 4. `mode=mock` stays available; it is labelled everywhere. The n8n workflow sets `mode` from a constant (default `mock`).

@@ -1,0 +1,877 @@
+{
+  "name": "Procurement Report Email (webhook)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "procurement-email",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "fa702e58-3763-59b9-a080-ceef7caab206",
+      "name": "Email Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "7d41e35b-d132-58fd-bd70-d407a54569ab"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a12475ec-f05d-5181-b765-409fdb219509",
+              "name": "notion_version",
+              "value": "2022-06-28",
+              "type": "string"
+            },
+            {
+              "id": "eb2d688d-3341-597f-9d86-1eb9a4dd9665",
+              "name": "assessments_db_id",
+              "value": "REPLACE_WITH_ASSESSMENTS_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "984e1f2e-f112-555b-8519-da7d81bb3556",
+              "name": "errors_db_id",
+              "value": "REPLACE_WITH_ERRORS_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "bf2b05d8-94e6-5bdc-9fb4-adaf2af8dc16",
+              "name": "recipient",
+              "value": "REPLACE_WITH_APPROVED_TEST_RECIPIENT",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f7aaa458-4b9b-5973-8ef6-54be581ea53a",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        300
+      ],
+      "notes": "Set the Notion database ids here (and the recipient in the e-mail workflow) after import. Placeholders make the workflow refuse to run."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const wh = $('Email Webhook').first().json;\nconst body = (wh.body && typeof wh.body === 'object' && !Array.isArray(wh.body)) ? wh.body : {};\nconst cfg = $('Config').first().json;\nconst a = (body.attachment && typeof body.attachment === 'object' && !Array.isArray(body.attachment)) ? body.attachment : {};\nconst isStr = v => typeof v === 'string';\nconst RID = /^[A-Za-z0-9_-]{1,64}$/, HEX64 = /^[0-9a-f]{64}$/, DATE = /^\\d{4}-\\d{2}-\\d{2}$/;\nconst rid = isStr(body.request_id) && RID.test(body.request_id) ? body.request_id : null;\nconst errors = [];\nif (body.action !== 'email') errors.push('INVALID_ACTION');\nif (!rid) errors.push('INVALID_REQUEST_ID');\nif (!isStr(body.report_sha256) || !HEX64.test(body.report_sha256)) errors.push('REPORT_HASH_INVALID');\nif (!isStr(body.notion_page_url) || !body.notion_page_url.startsWith('https://')) errors.push('NOTION_URL_INVALID');\nif (!isStr(body.executive_summary) || !body.executive_summary.trim()) errors.push('SUMMARY_MISSING');\nif (!['mock', 'live'].includes(body.mode)) errors.push('INVALID_MODE');\nif (['to', 'cc', 'bcc', 'recipient', 'recipients', 'sendTo', 'from'].some(k => Object.prototype.hasOwnProperty.call(body, k))) errors.push('RECIPIENT_FIELD_FORBIDDEN');\nif (!rid || a.filename !== 'procurement-risk-assessment-' + rid + '.pdf') errors.push('ATTACHMENT_FILENAME_INVALID');\nif (a.content_type !== 'application/pdf' || a.encoding !== 'base64') errors.push('ATTACHMENT_FORMAT_INVALID');\nif (!Number.isInteger(a.size_bytes) || a.size_bytes < 1 || a.size_bytes > 5000000) errors.push('ATTACHMENT_SIZE_INVALID');\nif (!isStr(a.sha256) || !HEX64.test(a.sha256)) errors.push('ATTACHMENT_HASH_INVALID');\nlet bytes = null;\nif (isStr(a.content_base64) && a.content_base64.length && a.content_base64.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(a.content_base64)) bytes = Buffer.from(a.content_base64, 'base64');\nelse errors.push('ATTACHMENT_BASE64_INVALID');\nif (bytes) {\n  if (bytes.length !== a.size_bytes) errors.push('ATTACHMENT_SIZE_MISMATCH');\n  if (bytes.subarray(0, 5).toString('latin1') !== '%PDF-') errors.push('PDF_HEADER_INVALID');\n  if (bytes.toString('latin1').trimEnd().slice(-5) !== '%%EOF') errors.push('PDF_EOF_INVALID');\n}\nconst dbOk = v => isStr(v) && /^[0-9a-f]{32}$/i.test(v.replace(/-/g, ''));\nconst mailOk = v => isStr(v) && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v) && !/REPLACE/i.test(v);\nconst configBad = !dbOk(cfg.assessments_db_id) || !DATE.test(String(cfg.notion_version || '')) || !mailOk(cfg.recipient);\nconst valid = errors.length === 0 && !configBad;\nconst slim = { ...body, attachment: { ...a, content_base64: undefined } };   // the PDF travels once, as pdf_base64\nconst json = { valid, request_id: rid, pdf_base64: valid ? a.content_base64 : null, pdf_filename: valid ? a.filename : null, body: slim };\nif (!valid) json.failure = { code: configBad ? 'CONFIG_NOT_SET' : 'INVALID_PAYLOAD', retry_count: 0, details: errors };\nreturn [{ json }];\n"
+      },
+      "id": "cfcc45d2-e01d-549a-b803-7db5622d0d20",
+      "name": "Validate email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "08a101e2-f6ec-523d-a22e-4b20db604487",
+              "leftValue": "={{ $json.valid === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d8c750e0-425a-5619-a50b-8c9c96a92296",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "pdf_base64",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ $json.pdf_filename }}",
+          "mimeType": "application/pdf",
+          "dataIsBase64": true
+        }
+      },
+      "id": "c0edb772-b9d3-53b3-841f-33f14381a1fd",
+      "name": "PDF to binary",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        300
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "dataPropertyName": "computed_attachment_sha256",
+        "encoding": "hex"
+      },
+      "id": "736c94f0-3b16-5b47-aca7-0604684497a8",
+      "name": "Hash PDF",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b1adce54-9bf6-550c-90d5-a16349c05449",
+              "leftValue": "={{ $json.computed_attachment_sha256 === $('Validate email').first().json.body.attachment.sha256 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "79383c20-f1e8-5e70-b54b-6b2c2e93297f",
+      "name": "Hash matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "return [{ json: { failure: { code: 'PDF_INVALID', retry_count: 0 } } }];\n"
+      },
+      "id": "d974c211-fc0a-58af-97e9-16e89e7737c7",
+      "name": "Fail: PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.notion.com/v1/databases/' + $('Config').first().json.assessments_db_id + '/query' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filter: { property: 'Request ID', rich_text: { equals: $('Validate email').first().json.request_id } }, sorts: [{ timestamp: 'created_time', direction: 'ascending' }], page_size: 10 }) }}"
+      },
+      "id": "30971c6b-8f57-5e68-80d9-442c75c85dd7",
+      "name": "Lookup page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Duplicate protection: the Notion page is the persistent delivery ledger (Email status). Nothing is sent unless it says not_requested, failed or empty.\nconst v = $('Validate email').first().json;\nconst b = v.body;\nconst results = $input.first().json.results || [];\nconst delivery = 'del-' + v.request_id;\nconst notReady = reason => ({ json: { route: 'final', failure: { code: 'ARCHIVE_NOT_READY', retry_count: 0, details: [reason] } } });\nif (results.length === 0) return [notReady('ARCHIVE_NOT_FOUND')];\nconst page = results[0];\nconst props = page.properties || {};\nconst sel = n => (props[n] && props[n].select && props[n].select.name) || null;\nconst txt = n => ((props[n] && props[n].rich_text) || []).map(r => r.plain_text ?? '').join('');\nif (sel('Archive status') !== 'stored') return [notReady('ARCHIVE_NOT_STORED')];\nif (txt('Report SHA-256') !== b.report_sha256) return [notReady('ARCHIVE_HASH_MISMATCH')];\nconst state = sel('Email status');\nif (state === 'sent') {\n  return [{ json: { route: 'final', outcome: { http_status: 200, response: { ok: true, request_id: v.request_id, email_status: 'already_sent', message_id: txt('Email message id') || null, delivery_id: txt('Delivery ID') || delivery } } } }];\n}\nif (state === 'sending' || state === 'unknown') {\n  return [{ json: { route: 'final', outcome: { http_status: 200, response: { ok: false, request_id: v.request_id, email_status: 'unknown', delivery_id: txt('Delivery ID') || delivery, error_code: 'EMAIL_STATE_UNCERTAIN' },\n    warning: { code: 'EMAIL_STATE_UNCERTAIN', severity: 'error', component: 'workflow', during: 'lookup', retry_count: 0 } } } }];\n}\nreturn [{ json: { route: 'send', page_id: page.id, page_url: page.url } }];\n"
+      },
+      "id": "0010f244-c24b-5199-a346-b97eadd82c7e",
+      "name": "Ledger decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f07eca93-ce0b-560f-98ff-ecd785eb664a",
+              "leftValue": "={{ $json.route === 'send' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "50892f03-3ffb-5fca-a448-b7fbc0b7a43a",
+      "name": "Send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1980,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://api.notion.com/v1/pages/' + $('Ledger decision').first().json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Email status': { select: { name: 'sending' } }, 'Delivery ID': { rich_text: [{ text: { content: 'del-' + $('Validate email').first().json.request_id } }] } } }) }}"
+      },
+      "id": "2e6a87b2-0e5e-5738-94b0-eae862431950",
+      "name": "Claim send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// The binary PDF was verified before the ledger claim; take exactly that file. Throwing here stops the workflow before any send.\nconst src = $('PDF to binary').first();\nif (!src || !src.binary || !src.binary.data) throw new Error('PDF_BINARY_MISSING');\nreturn [{ json: { send: true }, binary: { data: src.binary.data } }];\n"
+      },
+      "id": "61c03a77-3fc0-5de8-a659-add37c942c8e",
+      "name": "Restore PDF",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $('Config').first().json.recipient }}",
+        "subject": "={{ '[' + $('Validate email').first().json.body.mode.toUpperCase() + '] Procurement risk assessment: ' + $('Validate email').first().json.request_id }}",
+        "emailType": "text",
+        "message": "={{ 'Executive summary\\n\\n' + $('Validate email').first().json.body.executive_summary.replace(/\\*\\*/g, '').replace(/`/g, '').split('\\n').map(l => l.startsWith('- ') ? '\\u2022 ' + l.slice(2) : l).join('\\n\\n') + '\\n\\nNotion page: ' + $('Ledger decision').first().json.page_url + '\\n\\nThe complete report is attached as a PDF.' }}",
+        "options": {
+          "appendAttribution": false,
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "data"
+              }
+            ]
+          }
+        }
+      },
+      "id": "b32e4fb1-5ad7-5f29-9594-aebba7104260",
+      "name": "Gmail send",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2640,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": false,
+      "notes": "Native Gmail SEND (not a draft). Never enable retry-on-fail: an uncertain send must not be repeated."
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://api.notion.com/v1/pages/' + $('Ledger decision').first().json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Email status': { select: { name: 'sent' } }, 'Email message id': { rich_text: [{ text: { content: String($('Gmail send').first().json.id ?? '') } }] } } }) }}"
+      },
+      "id": "32fdd0fb-85ef-5102-9781-4103ab8f7312",
+      "name": "Record sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        180
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://api.notion.com/v1/pages/' + $('Ledger decision').first().json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Email status': { select: { name: (parseInt($json.error?.httpCode ?? $json.error?.statusCode ?? $json.error?.code, 10) >= 400 && parseInt($json.error?.httpCode ?? $json.error?.statusCode ?? $json.error?.code, 10) < 500) ? 'failed' : 'unknown' } } } }) }}"
+      },
+      "id": "a5524890-31fa-5505-8ef9-b2350f72e57f",
+      "name": "Record failed or unknown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2860,
+        420
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// A Notion call failed: before the ledger decision it is the lookup; afterwards it is the claim (nothing was sent).\nreturn [{ json: { failure: { code: $('Ledger decision').isExecuted ? 'NOTION_LEDGER_FAILED' : 'NOTION_LOOKUP_FAILED', retry_count: 3 } } }];\n"
+      },
+      "id": "d18c4488-297d-5f6c-8603-7377431fe078",
+      "name": "Fail: notion",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const v = $('Validate email').first().json;\nconst rid = v.request_id ?? null;\nconst delivery = rid ? 'del-' + rid : null;\nconst j = $input.first().json;\nconst MAP = {\n  INVALID_PAYLOAD:       { http: 422, component: 'validation', during: 'validation', severity: 'warning' },\n  CONFIG_NOT_SET:        { http: 503, component: 'workflow',   during: 'validation', severity: 'critical' },\n  PDF_INVALID:           { http: 422, component: 'validation', during: 'validation', severity: 'error' },\n  NOTION_LOOKUP_FAILED:  { http: 502, component: 'notion',     during: 'lookup',     severity: 'error' },\n  NOTION_LEDGER_FAILED:  { http: 502, component: 'notion',     during: 'send',       severity: 'error' },\n  ARCHIVE_NOT_READY:     { http: 409, component: 'notion',     during: 'lookup',     severity: 'warning' },\n};\nconst statusOf = p => (p && p.object === 'page' && p.properties && p.properties['Email status'] && p.properties['Email status'].select && p.properties['Email status'].select.name) || null;\nif (j.outcome) {                       // decided by the ledger: already_sent, or an uncertain earlier state\n  const o = j.outcome;\n  return [{ json: { http_status: o.http_status, response: o.response, error: o.warning ? { ...o.warning, workflow: 'email' } : null } }];\n}\nif (!j.failure && $('Record sent').isExecuted) {          // Gmail accepted the message; Notion's answer says whether the ledger was updated\n  const ledgerOk = statusOf(j) === 'sent';\n  const response = { ok: true, request_id: rid, email_status: 'sent', message_id: $('Gmail send').first().json.id ?? null, delivery_id: delivery,\n    attachment_sha256_echo: $('Hash PDF').first().json.computed_attachment_sha256 };\n  if (!ledgerOk) response.ledger_warning = true;\n  return [{ json: { http_status: 200, response, error: ledgerOk ? null : { code: 'EMAIL_LEDGER_UPDATE_FAILED', severity: 'critical', component: 'notion', during: 'response', retry_count: 3, workflow: 'email' } } }];\n}\nif (!j.failure && $('Record failed or unknown').isExecuted) {   // Gmail errored; the ledger says failed (not accepted) or unknown (uncertain)\n  const state = statusOf(j) === 'failed' ? 'failed' : 'unknown';\n  const code = state === 'failed' ? 'GMAIL_SEND_FAILED' : 'GMAIL_SEND_UNKNOWN';\n  const response = { ok: false, request_id: rid, email_status: state, delivery_id: delivery, error_code: code };\n  if (j.object !== 'page') response.ledger_warning = true;\n  return [{ json: { http_status: state === 'failed' ? 502 : 200, response, error: { code, severity: state === 'failed' ? 'error' : 'critical', component: 'gmail', during: 'send', retry_count: 0, workflow: 'email' } } }];\n}\nconst f = j.failure || { code: 'WORKFLOW_ERROR', retry_count: 0 };\nconst spec = MAP[f.code] || { http: 502, component: 'workflow', during: 'response', severity: 'error' };\nconst response = { ok: false, request_id: rid, email_status: 'failed', delivery_id: delivery, error_code: f.code };\nif (f.details) response.details = f.details;\nreturn [{ json: { http_status: spec.http, response,\n  error: { code: f.code, severity: spec.severity, component: spec.component, during: spec.during, retry_count: f.retry_count || 0, workflow: 'email' } } }];\n"
+      },
+      "id": "e1a3aed7-9101-5341-bd8a-4e1958402984",
+      "name": "Finalize outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3080,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Finalize outcome').first().json.response) }}",
+        "options": {
+          "responseCode": "={{ $('Finalize outcome').first().json.http_status }}"
+        }
+      },
+      "id": "0e674230-0bea-5a1e-afd0-08df80caf585",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "bff7acae-3962-5839-a847-d2cc5f336b69",
+              "leftValue": "={{ !!$('Finalize outcome').first().json.error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0ab0979c-a478-5be8-80b1-ee4b2bb8d10b",
+      "name": "Has error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Best-effort operational error record, written AFTER the answer was sent. Only codes, ids and counters: never exception text, report text or PDF content.\nconst o = $('Finalize outcome').first().json;\nconst e = o.error;\nconst cfg = $('Config').first().json;\nconst rid = o.response && typeof o.response.request_id === 'string' && o.response.request_id ? o.response.request_id : null;\nconst rt = s => (s ? { rich_text: [{ text: { content: String(s).slice(0, 300) } }] } : { rich_text: [] });\nconst properties = {\n  'Name': { title: [{ text: { content: (e.code + ' ' + (rid || '')).trim() } }] },\n  'Timestamp': { date: { start: new Date().toISOString() } },\n  'Request ID': rt(rid),\n  'Workflow': { select: { name: e.workflow } },\n  'Component': { select: { name: e.component } },\n  'Error code': rt(e.code),\n  'Severity': { select: { name: e.severity } },\n  'Status': { select: { name: 'open' } },\n  'Execution ID': rt($execution.id),\n  'Retry count': { number: Number.isInteger(e.retry_count) ? e.retry_count : 0 },\n  'Occurred during': { select: { name: e.during } },\n  'Error ID': rt(('E-' + e.workflow + '-' + (rid || 'noid') + '-' + e.code).slice(0, 120)),\n};\nreturn [{ json: { notion_body: { parent: { database_id: cfg.errors_db_id }, properties } } }];\n"
+      },
+      "id": "c9b71b62-f283-55f7-be68-a3c983326bbb",
+      "name": "Build error record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.notion_body) }}"
+      },
+      "id": "4566bb6a-bf91-5fe8-acdf-3185e708dc95",
+      "name": "Log error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4040,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "content": "## E-mail workflow (webhook)\n**After import:** bind *Header Auth* (header `X-Webhook-Secret`) to the webhook, *Notion API* to every Notion node and the authorized *Gmail OAuth2* credential to **Gmail send**; set `assessments_db_id`, `errors_db_id` and the fixed approved `recipient` in **Config**.\nFlow: validate -> verify the PDF (SHA-256 of the decoded binary) -> check the Notion ledger (`Email status`) -> claim `sending` -> Gmail Send -> record result. One real e-mail only when the Gradio user clicks the button. **The production URL exists only while ACTIVE.**",
+        "height": 240,
+        "width": 900
+      },
+      "id": "db6f9fff-cb21-5bda-8ef4-4e9d2fbe4fe8",
+      "name": "Setup notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -300
+      ]
+    }
+  ],
+  "connections": {
+    "Email Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Validate email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate email": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "PDF to binary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PDF to binary": {
+      "main": [
+        [
+          {
+            "node": "Hash PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash PDF": {
+      "main": [
+        [
+          {
+            "node": "Hash matches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash matches?": {
+      "main": [
+        [
+          {
+            "node": "Lookup page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail: PDF": {
+      "main": [
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup page": {
+      "main": [
+        [
+          {
+            "node": "Ledger decision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ledger decision": {
+      "main": [
+        [
+          {
+            "node": "Send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send?": {
+      "main": [
+        [
+          {
+            "node": "Claim send",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim send": {
+      "main": [
+        [
+          {
+            "node": "Restore PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail: notion": {
+      "main": [
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore PDF": {
+      "main": [
+        [
+          {
+            "node": "Gmail send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail send": {
+      "main": [
+        [
+          {
+            "node": "Record sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record failed or unknown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record sent": {
+      "main": [
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record failed or unknown": {
+      "main": [
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize outcome": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond": {
+      "main": [
+        [
+          {
+            "node": "Has error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has error?": {
+      "main": [
+        [
+          {
+            "node": "Build error record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build error record": {
+      "main": [
+        [
+          {
+            "node": "Log error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false,
+    "executionTimeout": 300
+  },
+  "versionId": "60ae2f5b-5811-5cd2-8bd3-72871c4edc6f",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {},
+  "tags": []
+}

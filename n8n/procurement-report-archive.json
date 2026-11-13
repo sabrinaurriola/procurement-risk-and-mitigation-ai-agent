@@ -1,0 +1,966 @@
+{
+  "name": "Procurement Report Archive (webhook)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "procurement-archive",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "29576656-b391-5239-adb8-2976b7254992",
+      "name": "Archive Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "ef1ceed1-6b75-518c-a408-280b86e1a0b4"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8cda5bf3-7e07-5c02-8032-3519f0ec13a7",
+              "name": "notion_version",
+              "value": "2022-06-28",
+              "type": "string"
+            },
+            {
+              "id": "5fc2d60f-1174-576c-a4e5-f600ef2cabd6",
+              "name": "assessments_db_id",
+              "value": "REPLACE_WITH_ASSESSMENTS_DATABASE_ID",
+              "type": "string"
+            },
+            {
+              "id": "ce8f2a93-4722-5e99-9415-21db172f9058",
+              "name": "errors_db_id",
+              "value": "REPLACE_WITH_ERRORS_DATABASE_ID",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "55dadb1a-1e6d-55d0-b6a4-42315737dc5a",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        300
+      ],
+      "notes": "Set the Notion database ids here (and the recipient in the e-mail workflow) after import. Placeholders make the workflow refuse to run."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const wh = $('Archive Webhook').first().json;\nconst body = (wh.body && typeof wh.body === 'object' && !Array.isArray(wh.body)) ? wh.body : {};\nconst cfg = $('Config').first().json;\nconst isStr = v => typeof v === 'string';\nconst RID = /^[A-Za-z0-9_-]{1,64}$/, HEX64 = /^[0-9a-f]{64}$/, DATE = /^\\d{4}-\\d{2}-\\d{2}$/;\nconst rid = isStr(body.request_id) && RID.test(body.request_id) ? body.request_id : null;\nconst m = body.metadata || {};\nconst errors = [];\nif (body.action !== 'archive') errors.push('INVALID_ACTION');\nif (!rid) errors.push('INVALID_REQUEST_ID');\nif (!['completed', 'partial'].includes(body.assessment_status)) errors.push('INVALID_ASSESSMENT_STATUS');\nif (!['mock', 'live'].includes(body.mode)) errors.push('INVALID_MODE');\nif (!isStr(body.report_sha256) || !HEX64.test(body.report_sha256)) errors.push('REPORT_HASH_INVALID');\nif (m.ingredient !== 'sunflower_oil') errors.push('INGREDIENT_UNSUPPORTED');\nif (!Number.isInteger(m.horizon_months)) errors.push('HORIZON_INVALID');\nif (!isStr(m.assessment_date) || !DATE.test(m.assessment_date)) errors.push('ASSESSMENT_DATE_INVALID');\nif (!Array.isArray(body.blocks) || !body.blocks.length || body.total_blocks !== body.blocks.length) errors.push('BLOCKS_INVALID');\nconst dbOk = v => isStr(v) && /^[0-9a-f]{32}$/i.test(v.replace(/-/g, ''));\nconst configBad = !dbOk(cfg.assessments_db_id) || !DATE.test(String(cfg.notion_version || ''));\nconst json = { valid: errors.length === 0 && !configBad, request_id: rid, expected_blocks: Number.isInteger(body.total_blocks) ? body.total_blocks : 0, body };\nif (!json.valid) json.failure = { code: configBad ? 'CONFIG_NOT_SET' : 'INVALID_PAYLOAD', retry_count: 0, details: errors };\nreturn [{ json }];\n"
+      },
+      "id": "fca60af8-19de-5b24-9a8e-f92ae509296c",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c4403364-a47c-5ceb-90b3-3188d4e832ad",
+              "leftValue": "={{ $json.valid === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9d6c33bc-4aab-5554-afce-8839ac6bccb9",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.notion.com/v1/databases/' + $('Config').first().json.assessments_db_id + '/query' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filter: { property: 'Request ID', rich_text: { equals: $('Validate').first().json.request_id } }, sorts: [{ timestamp: 'created_time', direction: 'ascending' }], page_size: 10 }) }}"
+      },
+      "id": "b2f72838-ddb2-50e2-8415-a75b5bdb434b",
+      "name": "Lookup page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Oldest page with this Request ID wins; a page is never created twice and never overwritten.\nconst v = $('Validate').first().json;\nconst body = v.body;\nconst cfg = $('Config').first().json;\nconst results = $input.first().json.results || [];\nconst text = (p, name) => ((p.properties && p.properties[name] && p.properties[name].rich_text) || []).map(r => r.plain_text ?? '').join('');\nif (results.length === 0) {\n  const rt = s => ({ rich_text: [{ text: { content: s } }] });\n  const m = body.metadata;\n  const properties = {\n    'Name': { title: [{ text: { content: '[' + body.mode.toUpperCase() + '] Procurement risk assessment ' + v.request_id } }] },\n    'Request ID': rt(v.request_id),\n    'Ingredient': { select: { name: m.ingredient } },\n    'Assessment date': { date: { start: m.assessment_date } },\n    'Horizon months': { number: m.horizon_months },\n    'Mode': { select: { name: body.mode } },\n    'Assessment status': { select: { name: body.assessment_status } },\n    'Archive status': { select: { name: 'incomplete' } },\n    'Report SHA-256': rt(body.report_sha256),\n    'Total blocks': { number: body.total_blocks },\n    'Email status': { select: { name: 'not_requested' } },\n  };\n  return [{ json: { route: 'create', notion_body: { parent: { database_id: cfg.assessments_db_id }, properties } } }];\n}\nconst page = results[0];\nconst pageSha = text(page, 'Report SHA-256');\nif (pageSha && pageSha !== body.report_sha256) return [{ json: { route: 'fail', failure: { code: 'ARCHIVE_CONTENT_MISMATCH', retry_count: 0, page_url: page.url, echo: pageSha } } }];\nreturn [{ json: { route: 'ready', page_id: page.id, page_url: page.url, created: false } }];\n"
+      },
+      "id": "fbbe1803-d27d-537e-b25e-eab4320a5da2",
+      "name": "Decide",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "07883068-003a-5f1c-a774-b2e0c1ab1df8",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "create",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "create"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5b14243a-d13d-5acb-aee0-aef15349c07d",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "ready",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "ready"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "6cc8ee12-127d-57fc-b2f5-230b60c25e3c",
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "fail",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "fail"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b7fd3d8b-33d0-5876-80bc-5970daf7b94b",
+      "name": "Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.notion_body) }}"
+      },
+      "id": "e077dc38-78e4-5be3-ad0a-99da03e732f8",
+      "name": "Create page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        160
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const j = $input.first().json;\nif (j.object === 'page') return [{ json: { page_id: j.id, page_url: j.url, created: true } }];\nreturn [{ json: { page_id: j.page_id, page_url: j.page_url, created: false } }];\n"
+      },
+      "id": "98573dc9-f03a-5575-bf9e-94b16895f143",
+      "name": "Page ready",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://api.notion.com/v1/blocks/' + $('Page ready').first().json.page_id + '/children' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "start_cursor",
+                    "value": "={{ $response.body.next_cursor }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body.has_more !== true }}",
+              "limitPagesFetched": true,
+              "maxRequests": 30,
+              "requestInterval": 350
+            }
+          }
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "page_size",
+              "value": "100"
+            }
+          ]
+        }
+      },
+      "id": "09db7c11-9994-5b3b-81a7-400c690070fb",
+      "name": "List children",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Ground truth is what Notion returns now: every decision (append, finish, stop) comes from a fresh listing of the page body.\nconst v = $('Validate').first().json;\nconst blocks = v.body.blocks;\nconst total = blocks.length;\nconst pr = $('Page ready').first().json;\nconst existing = [];\nfor (const it of $input.all()) for (const b of (it.json.results || [])) existing.push(b);\nconst text = b => ((b[b.type] || {}).rich_text || []).map(r => r.plain_text ?? (r.text && r.text.content) ?? '').join('');\nconst sig = b => b.type + '\\u0001' + text(b);\nconst round = $runIndex + 1;\nlet bad = existing.length > total ? total : -1;\nfor (let i = 0; i < Math.min(existing.length, total) && bad < 0; i++) if (sig(existing[i]) !== sig(blocks[i])) bad = i;\nconst base = { existing: existing.length, round, page_url: pr.page_url, page_id: pr.page_id };\nconst stop = code => ({ ...base, action: 'stop', failure: { code, retry_count: round - 1, found: existing.length, page_url: pr.page_url } });\nif (bad >= 0) return [{ json: stop('ARCHIVE_CONTENT_MISMATCH') }];\nif (existing.length === total) return [{ json: { ...base, action: 'done' } }];\nif (round > Math.ceil(total / 100) + 1) return [{ json: stop('ARCHIVE_INCOMPLETE') }];\nreturn [{ json: { ...base, action: 'append', append_body: { children: blocks.slice(existing.length, existing.length + 100) } } }];\n"
+      },
+      "id": "02d28cb9-1824-59ec-b8fb-a9ad3568e951",
+      "name": "Compare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "2faed408-d00e-520e-ab27-eacac1adb1b4",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "append",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "append"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "ba05ae03-4c11-5654-9868-4cda23bf9afc",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "done",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "done"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c62316fb-2e9f-5a22-9244-8fd1a5101781",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "stop",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "stop"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e0de40e0-b8a6-5f41-b44a-5ad135a59002",
+      "name": "Next step",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://api.notion.com/v1/blocks/' + $json.page_id + '/children' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.append_body) }}"
+      },
+      "id": "a0eba182-4a03-5883-914d-08298865c9ba",
+      "name": "Append blocks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        160
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ 'https://api.notion.com/v1/pages/' + $('Page ready').first().json.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: { 'Archive status': { select: { name: 'stored' } }, 'Total blocks': { number: $('Validate').first().json.body.total_blocks } } }) }}"
+      },
+      "id": "1ceb80b1-9446-5806-988f-9e02044445eb",
+      "name": "Mark stored",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        300
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Any Notion call that failed. Before the page exists it is a lookup/create problem; afterwards the archive is simply not complete (the caller can resume).\nconst pr = $('Page ready').isExecuted ? $('Page ready').first().json : null;\nconst cmp = $('Compare').isExecuted ? $('Compare').last().json : null;\nif (!pr) return [{ json: { failure: { code: 'NOTION_PAGE_FAILED', retry_count: 3 } } }];\nreturn [{ json: { failure: { code: 'ARCHIVE_INCOMPLETE', retry_count: 0, found: cmp ? cmp.existing : 0, page_url: pr.page_url } } }];\n"
+      },
+      "id": "33c453ed-1878-5b40-993e-91b936c5a7dd",
+      "name": "Fail: notion",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const v = $('Validate').first().json;\nconst rid = v.request_id ?? null;\nconst j = $input.first().json;\nconst MAP = {\n  INVALID_PAYLOAD:          { http: 422, status: 'failed',     component: 'validation', during: 'validation', severity: 'warning' },\n  CONFIG_NOT_SET:           { http: 503, status: 'failed',     component: 'workflow',   during: 'validation', severity: 'critical' },\n  NOTION_PAGE_FAILED:       { http: 502, status: 'failed',     component: 'notion',     during: 'lookup',     severity: 'error' },\n  ARCHIVE_CONTENT_MISMATCH: { http: 200, status: 'failed',     component: 'notion',     during: 'verify',     severity: 'critical' },\n  ARCHIVE_INCOMPLETE:       { http: 200, status: 'incomplete', component: 'notion',     during: 'append',     severity: 'error' },\n};\nlet f = j.failure || null;\nconst pr = $('Page ready').isExecuted ? $('Page ready').first().json : null;\nconst cmp = $('Compare').isExecuted ? $('Compare').last().json : null;\nif (!f) {   // reached through \"Mark stored\": Notion's own answer is the confirmation\n  const props = j.properties || {};\n  const status = props['Archive status'] && props['Archive status'].select && props['Archive status'].select.name;\n  const echo = ((props['Report SHA-256'] && props['Report SHA-256'].rich_text) || []).map(r => r.plain_text ?? '').join('');\n  if (j.object !== 'page' || status !== 'stored' || echo !== v.body.report_sha256) {\n    f = { code: 'ARCHIVE_INCOMPLETE', retry_count: 3, found: cmp ? cmp.existing : 0, page_url: pr ? pr.page_url : null, echo: echo || null };\n  } else {\n    return [{ json: { http_status: 200, error: null, response: { ok: true, request_id: rid, archive_status: pr.created ? 'stored' : 'duplicate_existing',\n      notion_page_url: j.url || pr.page_url, blocks_expected: v.body.total_blocks, blocks_found: cmp.existing, report_sha256_echo: echo } } }];\n  }\n}\nconst spec = MAP[f.code] || { http: 502, status: 'failed', component: 'workflow', during: 'response', severity: 'error' };\nconst response = { ok: false, request_id: rid, archive_status: spec.status, notion_page_url: f.page_url ?? null, blocks_expected: v.expected_blocks || 0,\n  blocks_found: f.found ?? 0, report_sha256_echo: f.echo ?? null, error_code: f.code };\nif (f.details) response.details = f.details;\nreturn [{ json: { http_status: spec.http, response,\n  error: { code: f.code, severity: spec.severity, component: spec.component, during: spec.during, retry_count: f.retry_count || 0, workflow: 'archive' } } }];\n"
+      },
+      "id": "d9ea3725-c2fa-5da7-91f2-aceb84c38de6",
+      "name": "Finalize outcome",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Finalize outcome').first().json.response) }}",
+        "options": {
+          "responseCode": "={{ $('Finalize outcome').first().json.http_status }}"
+        }
+      },
+      "id": "d30cc178-8790-5d9f-889b-0ff472d81b9b",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "5691f388-a85a-5546-9f77-56ed7763a0bc",
+              "leftValue": "={{ !!$('Finalize outcome').first().json.error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0796561c-40ae-5a04-99e7-904210d24801",
+      "name": "Has error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Best-effort operational error record, written AFTER the answer was sent. Only codes, ids and counters: never exception text, report text or PDF content.\nconst o = $('Finalize outcome').first().json;\nconst e = o.error;\nconst cfg = $('Config').first().json;\nconst rid = o.response && typeof o.response.request_id === 'string' && o.response.request_id ? o.response.request_id : null;\nconst rt = s => (s ? { rich_text: [{ text: { content: String(s).slice(0, 300) } }] } : { rich_text: [] });\nconst properties = {\n  'Name': { title: [{ text: { content: (e.code + ' ' + (rid || '')).trim() } }] },\n  'Timestamp': { date: { start: new Date().toISOString() } },\n  'Request ID': rt(rid),\n  'Workflow': { select: { name: e.workflow } },\n  'Component': { select: { name: e.component } },\n  'Error code': rt(e.code),\n  'Severity': { select: { name: e.severity } },\n  'Status': { select: { name: 'open' } },\n  'Execution ID': rt($execution.id),\n  'Retry count': { number: Number.isInteger(e.retry_count) ? e.retry_count : 0 },\n  'Occurred during': { select: { name: e.during } },\n  'Error ID': rt(('E-' + e.workflow + '-' + (rid || 'noid') + '-' + e.code).slice(0, 120)),\n};\nreturn [{ json: { notion_body: { parent: { database_id: cfg.errors_db_id }, properties } } }];\n"
+      },
+      "id": "eaf3ea5f-abc3-541e-b7bb-8103cc44e2f1",
+      "name": "Build error record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.notion.com/v1/pages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Notion-Version",
+              "value": "={{ $('Config').first().json.notion_version }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.notion_body) }}"
+      },
+      "id": "bc749c66-8ade-5777-9291-d92e22b4ba42",
+      "name": "Log error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3840,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": false
+    },
+    {
+      "parameters": {
+        "content": "## Archive workflow (webhook)\n**After import:** bind the *Header Auth* credential to the webhook (header `X-Webhook-Secret`), bind the *Notion API* credential to every Notion node, and set `assessments_db_id` / `errors_db_id` in **Config**. Schemas: docs/notion-database-schemas.md.\nFlow: find page by Request ID (oldest wins) -> create without body -> loop: list body, compare with the sent blocks, append <= 100 -> `stored` only after a complete listing matches.\nAny Notion failure answers `incomplete`/`failed`; calling again resumes. **The production URL exists only while the workflow is ACTIVE.**",
+        "height": 240,
+        "width": 820
+      },
+      "id": "40c7c212-fc7e-5f65-a60a-20ce9dca5167",
+      "name": "Setup notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -260
+      ]
+    }
+  ],
+  "connections": {
+    "Archive Webhook": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Lookup page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup page": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Create page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Page ready",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create page": {
+      "main": [
+        [
+          {
+            "node": "Page ready",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Page ready": {
+      "main": [
+        [
+          {
+            "node": "List children",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List children": {
+      "main": [
+        [
+          {
+            "node": "Compare",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compare": {
+      "main": [
+        [
+          {
+            "node": "Next step",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next step": {
+      "main": [
+        [
+          {
+            "node": "Append blocks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark stored",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append blocks": {
+      "main": [
+        [
+          {
+            "node": "List children",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark stored": {
+      "main": [
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail: notion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fail: notion": {
+      "main": [
+        [
+          {
+            "node": "Finalize outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize outcome": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond": {
+      "main": [
+        [
+          {
+            "node": "Has error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has error?": {
+      "main": [
+        [
+          {
+            "node": "Build error record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build error record": {
+      "main": [
+        [
+          {
+            "node": "Log error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false,
+    "executionTimeout": 300
+  },
+  "versionId": "1878de7a-ed0a-5b9a-88d5-822a939a1348",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {},
+  "tags": []
+}

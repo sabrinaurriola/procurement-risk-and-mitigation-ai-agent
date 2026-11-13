@@ -1,4 +1,8 @@
-"""Deterministic Markdown rendering of a validated Report (the LLM never formats numbers)."""
+"""Deterministic Markdown rendering of a validated Report (the LLM never formats numbers).
+
+Nothing is truncated here: policy passages and quotes are shown in full. To reduce repetition a citation quote is printed where it first
+matters and later mentions use the reference only (an evidence id such as [E1] or a policy ref such as [POL-002#3]); the full passages of
+every cited policy are printed once in "Internal policy context" and the full evidence list is in the evidence register."""
 from __future__ import annotations
 
 from src.agent.schemas import Report
@@ -13,10 +17,19 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
+def _passage(content: str) -> tuple[str, str]:
+    """(heading, body) of a policy chunk: the chunk starts with a '## Heading' line; the marker is dropped, nothing else is cut."""
+    lines = [ln.strip() for ln in content.strip().splitlines() if ln.strip()]
+    if lines and lines[0].startswith("#"):
+        return lines[0].lstrip("#").strip(), " ".join(lines[1:])
+    return "", " ".join(content.split()).lstrip("#").strip()
+
+
 def render_markdown(r: Report, status: str) -> str:
+    mock = any(e.is_mock for e in r.evidence) or any(w.startswith("MOCK") for w in r.warnings)
     L: list[str] = [f"# {r.title}", ""]
     L.append(f"**Request:** {r.request_id} · **Assessment date:** {r.assessment_date} · **Status:** {status.upper()}")
-    if any(e.is_mock for e in r.evidence) or any(w.startswith("MOCK") for w in r.warnings):
+    if mock:
         L += ["", "> **MOCK RUN — fixture data, not live market intelligence.**"]
     if r.warnings:
         L += ["", "## Warnings"] + [f"- {w}" for w in r.warnings]
@@ -29,9 +42,15 @@ def render_markdown(r: Report, status: str) -> str:
               "_These are not findings. A person may still want to investigate them._"] + [f"- {x}" for x in r.removed_claims]
 
     L += ["", "## How to read the findings",
+          "- **Three kinds of source are kept apart in this report.** (1) **Fictional internal data:** Bakery Foods Inc.'s suppliers, contracts, forecasts and policy "
+          "documents are invented; no news is ever attributed to these suppliers. (2) **External evidence:** web and news items found by search plus the EC benchmark; "
+          "their source tier and relevance are assigned by rules and a screening step, and a citation is \"validated\" only in the sense that its quote matches the "
+          "source text verbatim; this is not a fact-check. (3) **Sourcing leads:** companies found by search, always UNVERIFIED"
+          + (" (in this MOCK run they are fixture examples and are NOT real companies)." if mock else " (real companies, never approved or qualified)."),
           "- **Basis `internal_model`:** derived from the fictional internal contracts, forecasts, supplier records or the calculation outputs.",
           "- **Basis `external_evidence`:** supported by retrieved external sources (each citation carries a verbatim quote).",
-          "- **Basis `combined`:** links external evidence to the internal exposure. Market, contract-coverage and supplier-status risks are kept separate."]
+          "- **Basis `combined`:** links external evidence to the internal exposure. Market, contract-coverage and supplier-status risks are kept separate.",
+          "- **Citations:** a quote is printed where it is first used; later mentions give the reference only ([E1] evidence register, [POL-002#3] policy passage printed in full below)."]
 
     b = r.benchmark
     L += ["", "## Market benchmark (external data)"]
@@ -81,12 +100,21 @@ def render_markdown(r: Report, status: str) -> str:
 
     d = r.draft
     ev = {e.evidence_id: e for e in r.evidence}
+    seen: set[tuple[str, str]] = {(c.identity_citation.evidence_id, c.identity_citation.quote) for c in d.supplier_candidates}   # printed in the leads section
 
     def cites(cs) -> str:
-        return " ".join(f"[{c.evidence_id}: \"{c.quote}\"]" for c in cs)
+        out = []
+        for c in cs:
+            key = (c.evidence_id, c.quote)
+            if key in seen:
+                out.append(f"[{c.evidence_id}]")
+            else:
+                seen.add(key)
+                out.append(f"[{c.evidence_id}: \"{c.quote}\"]")
+        return " ".join(out)
 
-    def pol(cs) -> str:
-        return " ".join(f"[{c.policy_ref}: \"{c.quote}\"]" for c in cs)
+    def pol(cs) -> str:                       # the full passage is printed once in "Internal policy context"
+        return " ".join(f"[{c.policy_ref}]" for c in cs)
 
     def refs(rs) -> str:
         return (" Internal basis: " + ", ".join(f"`{x}`" for x in rs) + ".") if rs else ""
@@ -98,10 +126,10 @@ def render_markdown(r: Report, status: str) -> str:
     else:
         L.append(f"Retrieval: **{pc.method}**" + (" (fallback)" if pc.status == "fallback" else "") + (f" — {pc.note}" if pc.note else "")
                  + ". These passages come from fictional internal documents; they explain internal process and are not evidence of real regulatory "
-                   "compliance or of a supplier's current compliance.")
+                   "compliance or of a supplier's current compliance. Passages are printed in full; the findings below cite them by reference.")
         for p in pc.passages:
-            text = " ".join(p.content.split())
-            L.append(f"- **[{p.policy_ref}]** {p.doc_title} ({p.doc_type.replace('_', ' ')}): \"{text[:230]}{'…' if len(text) > 230 else ''}\"")
+            heading, body = _passage(p.content)
+            L.append(f"- **[{p.policy_ref}]** {p.doc_title} ({p.doc_type.replace('_', ' ')})" + (f" — {heading}" if heading else "") + f": {body}")
     L += ["", "## Risks"]
     L += [f"- **{x.risk_id} · {x.title}** — {x.category.replace('_', ' ')} · basis `{x.basis}` · severity **{x.severity.upper()}** "
           f"({x.severity_basis}) · {x.time_relevance}\n  {x.description}{refs(x.internal_refs)} {cites(x.citations)}" for x in d.risks] or [
@@ -111,15 +139,23 @@ def render_markdown(r: Report, status: str) -> str:
     L += ["", "## Mitigation options"]
     L += [f"- {m.option} ({m.applies_to.replace('_', ' ')}; basis `{m.basis}`; addresses {', '.join(m.addresses)}): {m.rationale}"
           f"{refs(m.internal_refs)} {cites(m.citations)} {pol(m.policy_citations)}" for m in d.mitigation_options] or ["- None proposed."]
-    L += ["", "## Alternative-supplier leads — UNVERIFIED (real companies found by search; not approved, qualified or capacity-confirmed)"]
+    if mock:
+        L += ["", "## Alternative-supplier leads — MOCK FIXTURE EXAMPLES (not real companies; not approved, qualified or capacity-confirmed)"]
+    else:
+        L += ["", "## Alternative-supplier leads — UNVERIFIED (real companies found by search; not approved, qualified or capacity-confirmed)"]
     if d.supplier_candidates:
         for c in d.supplier_candidates:
             ident = ev.get(c.identity_citation.evidence_id)
             tier = TIER_LABEL.get(ident.credibility, "") if ident else ""
-            L.append(f"- **{c.name}** · **UNVERIFIED** · country: **{c.country}**"
-                     + (f" (\"{c.country_quote}\")" if c.country != "unknown" else " (not stated in the source)")
+            same = c.identity_citation.quote
+
+            def stated(q: str) -> str:
+                return "stated in the source passage below" if q == same else f"\"{q}\""
+            tag = "[MOCK FIXTURE - not a real company] " if (ident and ident.is_mock) else ""
+            L.append(f"- {tag}**{c.name}** · **UNVERIFIED** · country: **{c.country}**"
+                     + (f" ({stated(c.country_quote)})" if c.country != "unknown" else " (not stated in the source)")
                      + f" · product: **{c.product_type.replace('_', ' ')}**"
-                     + (f" (\"{c.product_quote}\")" if c.product_type != "unknown" else " (not stated in the source)")
+                     + (f" ({stated(c.product_quote)})" if c.product_type != "unknown" else " (not stated in the source)")
                      + f"\n  Source [{c.identity_citation.evidence_id}] ({tier}): \"{c.identity_citation.quote}\"\n  {c.rationale}"
                        f" **To verify independently:** {c.verification_needed}")
     else:

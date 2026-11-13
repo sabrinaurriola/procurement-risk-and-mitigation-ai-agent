@@ -8,17 +8,20 @@ Responses never contain credentials, file paths, connection details or exception
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, Path as PathParam, Request
+from fastapi import Depends, FastAPI, Header, Path as PathParam, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from src.api import notion_blocks
 from src.api.events import EventSink, NullEventSink
 from src.api.models import REQUEST_ID_RE, ApiRequest
 from src.api.runners import RunnerFactory, default_runner_factory
@@ -39,6 +42,11 @@ def _db_ok() -> bool:
         return True
     except BaseException:                      # SystemExit from a missing DATABASE_URL included
         return False
+
+
+class NotionVerifyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    children: list[dict[str, Any]] = Field(max_length=5000)          # the blocks currently on the Notion page, as Notion returned them
 
 
 def _safe(text: str, limit: int = 160) -> str:
@@ -110,5 +118,52 @@ def create_app(*, store_dir: Path | None = None, api_key: str | None = None, run
         if not md:
             return JSONResponse(error_body("REPORT_NOT_AVAILABLE", "This assessment produced no report.", request_id), status_code=404)
         return PlainTextResponse(md, media_type="text/markdown; charset=utf-8")
+
+    # ───────── Notion archive support (pure rendering of the stored report; FastAPI never calls Notion) ─────────
+    def archivable(request_id: str):
+        """(None, (source_markdown, envelope)) for a finished completed/partial record, else (response, None)."""
+        status, body, headers = service.get(request_id)
+        if status != 200:
+            return respond((status, body, headers)), None
+        md = body.get("report_markdown")
+        if body.get("assessment_status") not in ("completed", "partial") or not md:
+            return JSONResponse(error_body("REPORT_NOT_AVAILABLE", "This assessment has no archivable report.", request_id), status_code=404), None
+        return None, (md, body)
+
+    @app.get("/assessments/{request_id}/notion-blocks", dependencies=[Depends(require_key)])
+    def get_notion_blocks(request_id: str = PathParam(pattern=REQUEST_ID_RE.pattern), offset: int = Query(default=0, ge=0, le=1_000_000),
+                          limit: int = Query(default=notion_blocks.MAX_PAGE, ge=1, le=notion_blocks.MAX_PAGE)) -> JSONResponse:
+        early, found = archivable(request_id)
+        if early is not None:
+            return early
+        md, env = found
+        blocks = notion_blocks.render_blocks(md)
+        rep = env.get("report") or {}
+        page = blocks[offset:offset + limit]
+        nxt = offset + len(page)
+        return JSONResponse({
+            "request_id": request_id, "assessment_status": env["assessment_status"], "mode": "mock" if (env.get("execution") or {}).get("mock") else "live",
+            "report_sha256": notion_blocks.sha256_text(md),                                   # SOURCE: exact report.md bytes, never altered
+            "canonical_sha256": notion_blocks.sha256_text(notion_blocks.canonical(md)),         # what the blocks reproduce (layout-normalised)
+            "blocks_sha256": notion_blocks.sha256_text(json.dumps(blocks, sort_keys=True, separators=(",", ":"))),
+            "total_blocks": len(blocks), "offset": offset, "limit": limit, "count": len(page), "next_offset": nxt if nxt < len(blocks) else None,
+            "page": {"title": (env.get("report_title") or f"Assessment {request_id}")[:200], "properties": {
+                "request_id": request_id, "ingredient": rep.get("ingredient"), "horizon_months": rep.get("horizon_months"),
+                "assessment_date": env.get("assessment_date"), "mode": "mock" if (env.get("execution") or {}).get("mock") else "live",
+                "assessment_status": env["assessment_status"], "warnings": len(env.get("warnings") or []),
+                "claims_removed": len(rep.get("removed_claims") or []), "schema_version": env.get("schema_version")}},
+            "blocks": page})
+
+    @app.post("/assessments/{request_id}/notion-verify", dependencies=[Depends(require_key)])
+    def verify_notion_prefix(body: NotionVerifyBody, request_id: str = PathParam(pattern=REQUEST_ID_RE.pattern)) -> JSONResponse:
+        """Read-only check (does not start or change anything): are the blocks already on the Notion page exactly the expected prefix?"""
+        early, found = archivable(request_id)
+        if early is not None:
+            return early
+        md, _ = found
+        expected = notion_blocks.render_blocks(md)
+        return JSONResponse({"request_id": request_id, "report_sha256": notion_blocks.sha256_text(md),
+                             "canonical_sha256": notion_blocks.sha256_text(notion_blocks.canonical(md)),
+                             **notion_blocks.verify_prefix(expected, body.children)})
 
     return app

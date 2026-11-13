@@ -8,3 +8,18 @@ runs/
 # Third-party raw data: untracked until redistribution rights are confirmed (see data/raw/MANIFEST.md)
 data/raw/*
 !data/raw/MANIFEST.md
+
+# Font binaries are not committed (see assets/fonts/MANIFEST.md); recreate with: python -m src.bridge.fonts --fetch
+assets/fonts/*.ttf
+
+# Other local/secret files and editor noise
+.env.*
+!.env.example
+venv/
+*.log
+.DS_Store
+.vscode/
+.claude/settings.local.json
+
+# Local working notes (kept on disk, not published)
+docs/submission-readiness.md

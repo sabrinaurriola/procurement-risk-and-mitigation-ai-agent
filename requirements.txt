@@ -9,3 +9,6 @@ httpx==0.28.1
 tenacity==9.2.1
 fastapi==0.162.4
 uvicorn==0.54.0
+gradio==6.31.0   # Day 4 local UI (installed and validated in mock mode, 12 Nov)
+fpdf2==2.9.0     # Day 4 PDF attachment (fonttools is its dependency)
+fonttools==4.68.0

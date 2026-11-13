@@ -41,6 +41,8 @@ LIMITATIONS = [
     "External evidence comes from web/news search and may be incomplete, outdated or biased; material claims need human verification.",
     "Alternative-supplier candidates are real companies found by search; they are unverified sourcing leads only.",
 ]
+MOCK_LEAD_LIMITATION = ("This is a MOCK run: the alternative-supplier examples are fixture data, NOT real companies. In a live run, candidates are real companies "
+                        "found by search and are unverified sourcing leads only.")
 DISCLAIMERS = [
     "Advisory decision support only: the agent cannot approve suppliers, place orders or change contracts.",
     "Supplier candidates are unverified search results, not approved, qualified or capacity-confirmed suppliers; independent procurement verification and qualification are required before any action.",
@@ -473,11 +475,18 @@ def _finalize(state: AgentState, deps: Deps) -> AssessmentResponse:
     status_map = _describe_sources(state, deps)
     pol = state.get("policy")
     status_map["policy"] = (f"{pol.status}: {pol.method}, {len(pol.passages)} passages" + (f" ({pol.note})" if pol.note else "")) if pol else "not_run"
+    def _bad(s: str) -> bool:
+        return s.startswith(("unavailable", "partial", "not_configured"))
+    # D7: GDELT is an optional source. Its failure is always visible, but it alone does not make the report PARTIAL when Tavily answered in full
+    # and the retained evidence is sufficient. Any Tavily problem, missing evidence, removed claim, stale benchmark etc. still does.
+    gdelt_optional = not _bad(status_map.get("tavily", "not_used")) and bool(_usable_risk(evidence)) and bool(_strong(evidence))
     for name in ("tavily", "gdelt"):
         s = status_map.get(name, "not_used")
-        if s.startswith(("unavailable", "partial", "not_configured")):
-            partial.append(f"RESEARCH_SOURCE_{name.upper()}: {s}")
-            warnings.append(f"RESEARCH_SOURCE_{name.upper()}: {s}")
+        if _bad(s):
+            optional = name == "gdelt" and gdelt_optional
+            warnings.append(f"RESEARCH_SOURCE_{name.upper()}: {s}" + (" (optional source: Tavily evidence was sufficient, so this alone does not make the report PARTIAL)" if optional else ""))
+            if not optional:
+                partial.append(f"RESEARCH_SOURCE_{name.upper()}: {s}")
         elif "NO RESULTS" in s:
             warnings.append(f"RESEARCH_SOURCE_{name.upper()}: HTTP success but no usable results - {s}")
     if not _usable_risk(evidence):
@@ -499,13 +508,14 @@ def _finalize(state: AgentState, deps: Deps) -> AssessmentResponse:
     summary = compose_summary(draft=state["draft"], indicators=list(state.get("indicators", [])), financial=state["financial"],
                               suppliers=state["suppliers"], removed=removed, partial=partial,
                               observed=claims.observed_price_direction(evidence), horizon_months=req["horizon_months"],
-                              policy_status=pol.status if pol else "unavailable")
+                              policy_status=pol.status if pol else "unavailable", mock=deps.mock)
     report = Report(request_id=req["request_id"], ingredient=req["ingredient"], horizon_months=req["horizon_months"],
                     assessment_date=state["as_of"], title=f"{profile.display_name} Procurement Risk Assessment",
                     draft=state["draft"].model_copy(update={"executive_summary": summary}), indicators=list(state.get("indicators", [])), benchmark=state["benchmark"],
                     financial=state["financial"], policy=policy_context(pol), supplier_exposure=state["suppliers"], evidence=evidence,
                     source_status=status_map, removed_claims=removed, warnings=warnings,
-                    missing_data=list(state.get("missing_data", [])), limitations=list(LIMITATIONS), disclaimers=list(DISCLAIMERS))
+                    missing_data=list(state.get("missing_data", [])), limitations=[MOCK_LEAD_LIMITATION if deps.mock and x.startswith("Alternative-supplier candidates are real") else x for x in LIMITATIONS],
+                    disclaimers=list(DISCLAIMERS))
     status = "partial" if partial else "completed"
     return AssessmentResponse(request_id=req["request_id"], assessment_date=state["as_of"], status=status, report_title=report.title,
                               report_markdown=render_markdown(report, status), report=report, warnings=warnings,

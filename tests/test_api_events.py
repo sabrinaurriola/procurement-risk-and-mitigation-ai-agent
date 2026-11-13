@@ -4,12 +4,8 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from src.api.events import InMemoryEventSink, OperationalEvent, events_from_envelope
+from src.api.events import InMemoryEventSink, OperationalEvent, classify_source_status, events_from_envelope
 from tests.api_fixtures import BODY, HEADERS, Runner, client_for, make_app
-
-
-def ev(rid="e-1", **kw):
-    return OperationalEvent(event_key=f"{rid}|x", request_id=rid, event_type="assessment.finished", **kw)
 
 
 def test_a_real_mock_run_emits_events_that_match_the_envelope(tmp_path):
@@ -20,7 +16,7 @@ def test_a_real_mock_run_emits_events_that_match_the_envelope(tmp_path):
     sources = {e.detail["source"]: e for e in sink.events if e.event_type == "research.source"}
     assert set(sources) == set(env["report"]["source_status"])
     for name, e in sources.items():
-        assert e.detail["status"] == env["report"]["source_status"][name][:200]
+        assert e.detail["status_class"] == classify_source_status(env["report"]["source_status"][name])[0]        # fixed vocabulary, never the text
     fin = sink.events[-1]
     ex = env["execution"]
     assert fin.assessment_status == env["status"] and fin.duration_ms == int(round(ex["elapsed_seconds"] * 1000))
@@ -50,7 +46,7 @@ def test_demo_002_shaped_envelope_maps_every_metric_to_a_real_field():
     for e in evs:
         by.setdefault(e.event_type, []).append(e)
     gd = next(e for e in by["research.source"] if e.detail["source"] == "gdelt")
-    assert gd.severity == "warning" and gd.detail["status_class"] == "unavailable" and "429" in gd.detail["status"]
+    assert gd.severity == "warning" and gd.detail == {"source": "gdelt", "status_class": "unavailable", "status": "HTTP_429"}
     assert next(e for e in by["research.source"] if e.detail["source"] == "tavily").severity == "info"
     rem = by["validation.removed"][0]
     assert rem.detail == {"count": 3, "kinds": {"risks": 1, "supplier_candidates": 1, "mitigation_options": 1}} and rem.severity == "warning"
@@ -84,7 +80,7 @@ def test_event_keys_are_deterministic_so_a_retried_write_can_be_a_no_op():
 @pytest.mark.parametrize("kw", [{"request_id": "bad id"}, {"event_type": "assessment.exploded"}, {"error_code": "lowercase"}, {"duration_ms": -1},
                                 {"detail": {"report_text": "x"}}, {"detail": {"count": "x" * 5000}}, {"surprise": 1}, {"severity": "fatal"}])
 def test_event_validation_rejects_bad_rows(kw):
-    base = dict(event_key="k", request_id="e-1", event_type="assessment.finished")
+    base = dict(event_key="e-1|assessment.finished", request_id="e-1", event_type="assessment.finished", assessment_status="completed")
     with pytest.raises(ValidationError):
         OperationalEvent(**{**base, **kw})
 
@@ -107,5 +103,5 @@ def test_timeout_replay_and_interrupted_events_are_emitted(tmp_path):
 def test_event_taxonomy_covers_the_planned_archive_and_delivery_types_without_a_writer():
     for t, kw in (("archive.stored", {"archive_status": "stored"}), ("archive.failed", {"archive_status": "failed"}),
                   ("delivery.sent", {"delivery_status": "sent"}), ("delivery.failed", {"delivery_status": "failed"})):
-        OperationalEvent(event_key="k", request_id="e-1", component="n8n", event_type=t, **kw)
+        OperationalEvent(event_key=f"e-1|{t}|1", request_id="e-1", component="n8n", event_type=t, **kw)
     assert InMemoryEventSink().types() == []

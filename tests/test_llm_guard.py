@@ -132,7 +132,8 @@ def test_live_mode_requires_a_configured_model(monkeypatch, capsys):
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.setattr(run_module, "run_assessment", lambda *a, **k: pytest.fail("no assessment may run"))
     assert run_module.main(["--live"]) == 3
-    assert "MODEL_NOT_CONFIGURED" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "OPENAI_MODEL" in out          # refused before any client exists (the settings gate names the missing setting, never a value)
 
 
 def test_reasoning_effort_is_sent_only_when_configured(tmp_path):

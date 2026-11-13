@@ -221,7 +221,7 @@ class DemoLLM:
         alt_pol = _policy_cite(passages, "must not receive orders", "sourcing leads")
 
         def with_policy(text: str, cites: list[PolicyCitation]) -> str:
-            return f"{text} Policy context: {cites[0].quote}" if cites else text
+            return text            # the policy citation itself carries the passage; it is not pasted into the prose again
 
         if cov_id:
             mitig.append(Mitigation(option="Review contract coverage for the months with the largest uncovered volume",
@@ -295,5 +295,5 @@ class DemoLLM:
                                   internal_refs=[lead_ref], policy_citations=alt_pol))
         return DraftReport(executive_summary=summary, risks=risks, mitigation_options=mitig, supplier_candidates=cands,
                            recommended_actions=actions,
-                           uncertainties=[f"The benchmark is a crude-oil price, not the refined-oil contract price. {bench['caveat'][:90]}",
+                           uncertainties=[f"The benchmark is a crude-oil price, not the refined-oil contract price. {bench['caveat']}",
                                           "Mock evidence is not live market intelligence."])
